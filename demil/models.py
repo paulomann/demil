@@ -1,12 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pytorch_lightning as pl
 import numpy as np
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, AdamW, get_linear_schedule_with_warmup
 from demil import settings
 from torchvision import models
 from torchvision.models.resnet import ResNet
 import math
+from typing import Dict
 
 
 def avg_pool(data, input_lens: torch.BoolTensor = None):
@@ -22,7 +24,7 @@ def avg_pool(data, input_lens: torch.BoolTensor = None):
 
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, dropout:float = 0.1, max_len: int = 5000):
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
 
@@ -46,11 +48,13 @@ class MMIL(pl.LightningModule):
         self,
         d_model: int = 126,
         nhead: int = 2,
-        num_encoder_layers: int = 2,
-        num_decoder_layers: int = 2,
+        num_encoder_layers: int = 1,
+        num_decoder_layers: int = 1,
         ignore_pad: bool = False,
+        scheduler_args: Dict[str, int] = None
     ):
         super().__init__()
+        self.scheduler_args = scheduler_args
         self.ignore_pad = ignore_pad
         self.d_model = d_model
         self.transformer = nn.Transformer(
@@ -97,8 +101,12 @@ class MMIL(pl.LightningModule):
         return logits
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=2e-4)
-        return optimizer
+        optimizer = AdamW(
+            self.parameters(), lr=2e-4, betas=(0.9, 0.999), eps=1e-6, correct_bias=True
+        )
+        scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
+
+        return [optimizer], [scheduler]
 
     def training_step(self, train_batch, batch_idx):
         *_, labels = train_batch
