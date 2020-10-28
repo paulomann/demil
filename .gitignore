@@ -132,3 +132,5 @@ dmypy.json
 reports
 notebooks
 data
+lightning_logs
+wandb
