@@ -98,7 +98,7 @@ def get_dataloaders(
     regression: bool = False,
 ):
     if tokenizer is None:
-        tokenizer = AutoTokenizer.from_pretrained(settings.DEFAULT_TOKENIZER)
+        tokenizer = AutoTokenizer.from_pretrained(settings.LANGUAGE_MODEL)
     train = DepressionCorpus(period, "train", tokenizer, regression)
     val = DepressionCorpus(period, "val", tokenizer, regression)
     test = DepressionCorpus(period, "test", tokenizer, regression)

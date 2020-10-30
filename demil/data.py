@@ -73,7 +73,31 @@ class DepressionCorpus(torch.utils.data.Dataset):
         return (captions_tensors, images, score)
 
 
-# data is a list containing the batch examples, where each element is an example. data[i] is a list with size 3, where index 0 is the textual data, index 1 is visual data, and index 2 is the label
+def get_input_ids_attn_mask(
+    n_tokens: int, device: torch.device, dtype: torch.dtype
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if settings.LANGUAGE_MODEL in settings.BERTIMBAU:
+        input_ids = torch.zeros(size=(1, n_tokens), device=device, dtype=dtype)
+        input_ids[0][0], input_ids[0][1] = 101, 102
+        attn_mask = torch.zeros(size=(1, n_tokens), device=device, dtype=dtype)
+        attn_mask[0][0], attn_mask[0][1] = 1, 1
+
+    elif settings.LANGUAGE_MODEL in settings.XLM:
+        input_ids = torch.ones(size=(1, n_tokens), device=device, dtype=dtype)
+        input_ids[0][0], input_ids[0][1] = 0, 2
+        attn_mask = torch.zeros(size=(1, n_tokens), device=device, dtype=dtype)
+        attn_mask[0][0], attn_mask[0][1] = 1, 1
+    else:
+        raise ValueError(
+            f"Language model '{settings.LANGUAGE_MODEL}' is not currently supported."
+        )
+
+    return input_ids, attn_mask
+
+
+# data is a list containing the batch examples, where each element is an example.
+#  data[i] is a list with size 3, where index 0 is the textual data, index 1 is
+#  visual data, and index 2 is the label
 def collate_fn(data: Tuple):
     x = 0
     labels = torch.zeros(len(data), device=data[0][1].device, dtype=torch.long)
@@ -86,7 +110,9 @@ def collate_fn(data: Tuple):
         textual_data, visual_data, label = example
         input_ids, attn_mask = textual_data["input_ids"], textual_data["attention_mask"]
         fill = settings.MAX_SEQ_LENGTH - input_ids.size(0)
-        posts_mask = torch.zeros(settings.MAX_SEQ_LENGTH, dtype=torch.bool, device=attn_mask.device)
+        posts_mask = torch.zeros(
+            settings.MAX_SEQ_LENGTH, dtype=torch.bool, device=attn_mask.device
+        )
         posts_mask[:fill] = True
         n_tokens = input_ids.size(1)
         input_ids_pad = []
@@ -97,21 +123,10 @@ def collate_fn(data: Tuple):
         batch_post_attn_mask.append(posts_mask)
 
         for _ in range(0, fill):
-            # TODO: This works for RoBERTa, but I don't know if it works for BERTimbau
-            # This is the representation of an empty sentence in BERT.
-            # All ones, except the first and second elements being 0 and 2 respectively
-            # TODO:
-            aux_input_ids = torch.ones(
-                size=(1, n_tokens), device=input_ids.device, dtype=input_ids.dtype
+            aux_input_ids, aux_attn_mask = get_input_ids_attn_mask(
+                n_tokens, device=input_ids.device, dtype=input_ids.dtype
             )
-            aux_input_ids[0][0], aux_input_ids[0][1] = 0, 2
             input_ids_pad.append(aux_input_ids)
-            # This is the representation of an empty sentence for the
-            # attention mask in BERT: all zeros except indexes 0 and 1 being 1.
-            aux_attn_mask = torch.zeros(
-                size=(1, n_tokens), device=input_ids.device, dtype=input_ids.dtype
-            )
-            aux_attn_mask[0][0], aux_attn_mask[0][1] = 1, 1
             attn_mask_pad.append(aux_attn_mask)
 
         input_ids_pad.append(input_ids)
@@ -127,4 +142,3 @@ def collate_fn(data: Tuple):
         torch.stack(batch_post_attn_mask),
         labels,
     )
-

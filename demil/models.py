@@ -67,7 +67,7 @@ class MMIL(pl.LightningModule):
             num_encoder_layers=num_encoder_layers,
             num_decoder_layers=num_decoder_layers,
         )
-        self.text_encoder = AutoModel.from_pretrained(settings.DEFAULT_MODEL)
+        self.text_encoder = AutoModel.from_pretrained(settings.LANGUAGE_MODEL)
         self.visual_encoder = models.resnet34(pretrained=True)
         self.visual_encoder.fc = nn.Identity()
         self.pos_encoder = PositionalEncoding(d_model)
