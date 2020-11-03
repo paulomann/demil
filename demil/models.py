@@ -55,10 +55,12 @@ class MMIL(pl.LightningModule):
         num_decoder_layers: int = 1,
         ignore_pad: bool = False,
         scheduler_args: Dict[str, int] = None,
+        optimizer_args: Dict[str, int] = None,
         use_mask: bool = False,
     ):
         super().__init__()
         self.scheduler_args = scheduler_args
+        self.optimizer_args = optimizer_args
         self.ignore_pad = ignore_pad
         self.d_model = d_model
         self.transformer = nn.Transformer(
@@ -137,11 +139,8 @@ class MMIL(pl.LightningModule):
         return logits
 
     def configure_optimizers(self):
-        optimizer = AdamW(
-            self.parameters(), lr=2e-4, betas=(0.9, 0.999), eps=1e-6, correct_bias=True
-        )
+        optimizer = AdamW(self.parameters(), **self.optimizer_args)
         scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
-
         return [optimizer], [scheduler]
 
     def training_step(self, train_batch, batch_idx):
@@ -150,10 +149,10 @@ class MMIL(pl.LightningModule):
         if labels is not None:
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(logits.view(-1, 2), labels.view(-1))
-        
+
         with torch.no_grad():
             preds = F.softmax(logits, dim=1).argmax(dim=1)
-            acc = ((preds == labels).sum().float())/len(labels)
+            acc = ((preds == labels).sum().float()) / len(labels)
 
         # self.logger.experiment.log({"train_loss": loss})
         # self.log("train_loss", loss)
@@ -170,7 +169,7 @@ class MMIL(pl.LightningModule):
         # self.logger.experiment.log({"val_loss": loss})
         # self.log("val_loss", loss)
         preds = F.softmax(logits, dim=1).argmax(dim=1)
-        acc = ((preds == labels).sum().float())/len(labels)
+        acc = ((preds == labels).sum().float()) / len(labels)
 
         # self.logger.experiment.log({"train_loss": loss})
         # self.log("train_loss", loss)
