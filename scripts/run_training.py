@@ -8,6 +8,7 @@ from demil import settings
 from demil.data import collate_fn
 from demil.models import MMIL
 import click
+from transformers import AutoTokenizer
 
 
 @click.command()
@@ -18,9 +19,9 @@ import click
 @click.option("--bsz", default=8, help=f"Batch Size", type=click.INT)
 @click.option("--epochs", default=15, help=f"Number of epochs", type=click.INT)
 @click.option(
-    "--use-mask",
+    "--use-mask/--no-use-mask",
     is_flag=True,
-    help=f"Use mask to make element i not attend to every other element in the sequence",
+    help=f"Use mask to make element i not attend to every other element in the sequence. It does not work well with the --ignore-pad flag (yields nan results)",
 )
 @click.option(
     "--gradient-clip-val", default=0.5, help=f"Norm to clip gradients", type=click.FLOAT
@@ -40,9 +41,10 @@ import click
 )
 @click.option("--d-model", default=126, help=f"d_model", type=click.INT)
 @click.option(
-    "--ignore-pad",
+    "--ignore-pad/--no-ignore-pad",
     is_flag=True,
-    help=f"Use mask to make element i not attend to every other element in the sequence",
+    help=f"Ignore padding elements in the sequence. Does not work well with the --use-mask flag (it yields nan values in the training)",
+    default=True
 )
 @click.option("--lr", default=2e-4, help=f"Learning Rate", type=click.FLOAT)
 @click.option("--b1", default=0.9, help=f"AdamW b1 beta parameter", type=click.FLOAT)
@@ -57,7 +59,7 @@ import click
     "--weight-decay", default=0, help=f"Decoupled weight decay to apply", type=click.FLOAT
 )
 @click.option(
-    "--correct-bias",
+    "--correct-bias/--no-correct-bias",
     is_flag=True,
     help=f"Whether ot not to correct bias in Adam",
     default=True,
@@ -92,6 +94,12 @@ import click
     help=f"The number of layers to freeze in the visual encoder. Maximum is 10 (number of blocks in the ResNet network)",
     type=click.INT,
 )
+@click.option(
+    "--wandb/--no-wandb",
+    is_flag=True,
+    help=f"Whether to use wandb or not",
+    default=True,
+)
 def train(
     gpu: int,
     name: str,
@@ -116,13 +124,18 @@ def train(
     vis_model: str,
     txt_freeze_n_layers: int,
     vis_freeze_n_layers: int,
+    wandb: bool,
 ):
     parameters = locals()
+    print(f"====> Parameters: {parameters}")
     available_periods = [365, 212, 60]
     if period not in available_periods:
         raise ValueError(
             f"Period of {period} is not valid. Please, use one of the following: {available_periods}"
         )
+    if ignore_pad and use_mask:
+        raise ValueError("You cannot use --ignore-pad and --use-mask at the same time.")
+
     settings.LANGUAGE_MODEL = language_model
     tokenizer = AutoTokenizer.from_pretrained(language_model)
     train, val, test = get_dataloaders(
@@ -143,6 +156,8 @@ def train(
     }
     parameters.update(scheduler_args)
     wandb_logger = WandbLogger(project="demil", name=name, config=parameters)
+    if not wandb:
+        wandb_logger = None
     model = MMIL(
         scheduler_args=scheduler_args,
         optimizer_args=optimizer_args,
@@ -155,11 +170,11 @@ def train(
         vis_freeze_n_layers=vis_freeze_n_layers,
         txt_freeze_n_layers=txt_freeze_n_layers,
         language_model=language_model,
-        vis_model=vis_model
+        vis_model=vis_model,
     )
     trainer = pl.Trainer(
         max_steps=t_total,
-        logger=wandb_logger,
+        logger=wandb_logger if wandb else None,
         gpus=[gpu],
         accumulate_grad_batches=gradient_accumulation_steps,
         track_grad_norm=2,

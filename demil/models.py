@@ -118,7 +118,8 @@ class MMIL(pl.LightningModule):
         visual_ftrs = self.vis_proj(visual_ftrs).transpose(0, 1)  # [SEQ, BATCH, EMB]
         src = self.pos_encoder(textual_ftrs)
         tgt = self.pos_encoder(visual_ftrs)
-        if self.ignore_pad:
+        
+        if not self.ignore_pad:
             key_padd_mask = None
 
         if self.mask is None and self.use_mask:
