@@ -15,8 +15,8 @@ import click
     "--gpu", required=True, help=f"ID of the GPU to run the training", type=click.INT
 )
 @click.option("--name", help=f"Name of the training (for wandb)", type=click.STRING)
-@click.option("--bsz", default=2, help=f"Batch Size", type=click.INT)
-@click.option("--epochs", default=10, help=f"Number of epochs", type=click.INT)
+@click.option("--bsz", default=8, help=f"Batch Size", type=click.INT)
+@click.option("--epochs", default=15, help=f"Number of epochs", type=click.INT)
 @click.option(
     "--use-mask",
     is_flag=True,
@@ -68,6 +68,30 @@ import click
     help=f"The observation period of the DepressionCorpus data.",
     type=click.INT,
 )
+@click.option(
+    "--language-model",
+    default=settings.LANGUAGE_MODEL,
+    help=f"Huggingface name of the model to be used",
+    type=click.STRING,
+)
+@click.option(
+    "--vis-model",
+    default=settings.VISUAL_MODEL,
+    help=f"Name of the visual model as in torchvision.models. Ex: 'resnet34'",
+    type=click.STRING,
+)
+@click.option(
+    "--txt-freeze-n-layers",
+    default=10,
+    help=f"The number of layers to freeze in the textual encoder. Maximum is 11 (number of transformer layers)",
+    type=click.INT,
+)
+@click.option(
+    "--vis-freeze-n-layers",
+    default=7,
+    help=f"The number of layers to freeze in the visual encoder. Maximum is 10 (number of blocks in the ResNet network)",
+    type=click.INT,
+)
 def train(
     gpu: int,
     name: str,
@@ -87,7 +111,11 @@ def train(
     eps: float,
     weight_decay: float,
     correct_bias: bool,
-    period: int
+    period: int,
+    language_model: str,
+    vis_model: str,
+    txt_freeze_n_layers: int,
+    vis_freeze_n_layers: int,
 ):
     parameters = locals()
     available_periods = [365, 212, 60]
@@ -95,7 +123,11 @@ def train(
         raise ValueError(
             f"Period of {period} is not valid. Please, use one of the following: {available_periods}"
         )
-    train, val, test = get_dataloaders(period=period, batch_size=bsz, collate_fn=collate_fn)
+    settings.LANGUAGE_MODEL = language_model
+    tokenizer = AutoTokenizer.from_pretrained(language_model)
+    train, val, test = get_dataloaders(
+        period=period, batch_size=bsz, collate_fn=collate_fn, tokenizer=tokenizer
+    )
     gradient_accumulation_steps = 1
     t_total = (len(train) // gradient_accumulation_steps) * epochs
     scheduler_args = {
@@ -120,6 +152,10 @@ def train(
         num_decoder_layers=num_decoder_layers,
         d_model=d_model,
         ignore_pad=ignore_pad,
+        vis_freeze_n_layers=vis_freeze_n_layers,
+        txt_freeze_n_layers=txt_freeze_n_layers,
+        language_model=language_model,
+        vis_model=vis_model
     )
     trainer = pl.Trainer(
         max_steps=t_total,

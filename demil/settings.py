@@ -14,6 +14,7 @@ PATH_TO_INSTAGRAM_DATA = Path(DATA_PATH, "instagram")
 MODELS_PATH = Path(ROOT, "models")
 LOG_PATH = Path(ROOT, "data", "logs", "logs.txt")
 LANGUAGE_MODEL = "neuralmind/bert-base-portuguese-cased"
+VISUAL_MODEL = "resnet34"
 WORKERS = 4
 MAX_SEQ_LENGTH = 60
 

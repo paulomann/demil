@@ -57,6 +57,10 @@ class MMIL(pl.LightningModule):
         scheduler_args: Dict[str, int] = None,
         optimizer_args: Dict[str, int] = None,
         use_mask: bool = False,
+        vis_model: str = settings.VISUAL_MODEL,
+        language_model: str = settings.LANGUAGE_MODEL,
+        vis_freeze_n_layers: int = 7,
+        txt_freeze_n_layers: int = 7,
     ):
         super().__init__()
         self.scheduler_args = scheduler_args
@@ -69,8 +73,8 @@ class MMIL(pl.LightningModule):
             num_encoder_layers=num_encoder_layers,
             num_decoder_layers=num_decoder_layers,
         )
-        self.text_encoder = AutoModel.from_pretrained(settings.LANGUAGE_MODEL)
-        self.visual_encoder = models.resnet34(pretrained=True)
+        self.text_encoder = AutoModel.from_pretrained(language_model)
+        self.visual_encoder = getattr(models, vis_model)(pretrained=True)
         self.visual_encoder.fc = nn.Identity()
         self.pos_encoder = PositionalEncoding(d_model)
         self.text_proj = nn.Linear(768, d_model)
@@ -82,7 +86,12 @@ class MMIL(pl.LightningModule):
         self.relu = nn.ReLU()
         self.mask = None
         self.use_mask = use_mask
-        self.partially_freeze_layers(self.text_encoder, self.visual_encoder)
+        self.partially_freeze_layers(
+            self.text_encoder,
+            self.visual_encoder,
+            txt_freeze_n_layers,
+            vis_freeze_n_layers,
+        )
 
     def generate_square_subsequent_mask(self, sz, device):
         mask = (torch.triu(torch.ones(sz, sz, device=device)) == 1).transpose(0, 1)
@@ -200,19 +209,27 @@ class MMIL(pl.LightningModule):
         nn.init.zeros_(self.vis_proj.bias.data)
         nn.init.zeros_(self.classifier.bias.data)
 
-    def partially_freeze_layers(self, text_encoder, vis_encoder):
+    def partially_freeze_layers(
+        self,
+        text_encoder: AutoModel,
+        vis_encoder: ResNet,
+        txt_freeze: int,
+        vis_freeze: int,
+    ):
         # visual, from https://discuss.pytorch.org/t/how-the-pytorch-freeze-network-in-some-layers-only-the-rest-of-the-training/7088/2
         ct = 0
         for child in vis_encoder.children():
             ct += 1
-            if ct < 7:
+            if ct <= vis_freeze:
                 for param in child.parameters():
                     param.requires_grad = False
 
         # textual
+        txt_freeze = str(txt_freeze)
         for name, param in text_encoder.named_parameters():
-            if "pooler" not in name and "11" not in name:
-                param.requires_grad = False
+            if txt_freeze in name:
+                break
+            param.requires_grad = False
 
         # Here we freeze all layers except the topmost layer.
         # for both textual and visual encoders
