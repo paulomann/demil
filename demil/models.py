@@ -9,6 +9,8 @@ from torchvision import models
 from torchvision.models.resnet import ResNet
 import math
 from typing import Dict
+import wandb
+from sklearn.metrics import precision_recall_fscore_support
 
 
 def avg_pool(data, input_lens: torch.BoolTensor = None):
@@ -118,7 +120,7 @@ class MMIL(pl.LightningModule):
         visual_ftrs = self.vis_proj(visual_ftrs).transpose(0, 1)  # [SEQ, BATCH, EMB]
         src = self.pos_encoder(textual_ftrs)
         tgt = self.pos_encoder(visual_ftrs)
-        
+
         if not self.ignore_pad:
             key_padd_mask = None
 
@@ -187,20 +189,43 @@ class MMIL(pl.LightningModule):
         return {"loss": loss, "val_acc": acc}
 
     def test_step(self, test_batch, batch_idx):
-        *_, labels = batch
+        *_, labels = test_batch
         logits = self(test_batch)
-        _, preds = torch.max(out, 1)
-        probas = F.softmax(out)
+        preds = F.softmax(logits, dim=1).argmax(dim=1)
+        probas = F.softmax(logits, dim=1)
+
+        labels = labels.cpu().tolist()
+        probas = probas.cpu().tolist()
+        preds = preds.cpu().tolist()
+        return (labels, probas, preds)
+
+    def test_epoch_end(self, outputs):
+        labels = []
+        probas = []
+        preds = []
+        for i in outputs:
+            labels.extend(i[0])
+            probas.extend(i[1])
+            preds.extend(i[2])
+
         self.logger.experiment.log(
             {
                 "roc": wandb.plots.ROC(
-                    labels.numpy(), probas.numpy(), ["Not Depressed", "Depressed"]
+                    np.array(labels), np.array(probas), ["Not Depressed", "Depressed"]
                 )
             }
         )
-        self.logger.experiment.sklearn.plot_confusion_matrix(
-            labels.numpy(), preds.numpy(), ["Not Depressed", "Depressed"]
+        self.logger.experiment.log(
+            {
+                "cm": wandb.sklearn.plot_confusion_matrix(
+                    np.array(labels), np.array(preds), ["Not Depressed", "Depressed"]
+                )
+            }
         )
+        precision, recall, fscore, _ = precision_recall_fscore_support(
+            labels, preds, average="binary"
+        )
+        self.log_dict({"precision": precision, "recall": recall, "fscore": fscore})
 
     def init_layers(self):
         nn.init.normal_(self.text_proj.weight.data, 0, 0.02)
