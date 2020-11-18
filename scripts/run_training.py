@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from typing import Literal, List
 from demil.utils import get_dataloaders
 from demil import settings
@@ -156,6 +157,10 @@ def train(
     }
     parameters.update(scheduler_args)
     wandb_logger = WandbLogger(project="demil", name=name, config=parameters)
+    checkpoint_callback = ModelCheckpoint(
+        monitor='val_acc',
+        mode="max",
+    )
     if not wandb:
         wandb_logger = None
     model = MMIL(
@@ -180,8 +185,12 @@ def train(
         track_grad_norm=2,
         gradient_clip_val=gradient_clip_val,
         log_every_n_steps=log_every_n_steps,
+        checkpoint_callback=checkpoint_callback,
+        default_root_dir=settings.MODELS_PATH
+
     )
     trainer.fit(model, train, val)
+    trainer.test(test_dataloaders=test)
 
 
 if __name__ == "__main__":
