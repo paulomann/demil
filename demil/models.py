@@ -48,6 +48,116 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+class EncoderLSTM(nn.Module):
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        n_layers: int = 1,
+        dropout: float = 0,
+        ignore_pad: bool = True,
+        batch_first: bool = False,
+    ):
+        super(EncoderLSTM, self).__init__()
+        self.n_layers = n_layers
+        self.hidden_size = hidden_size
+        self.input_size = input_size
+        self.ignore_pad = ignore_pad
+        self.lstm = nn.LSTM(
+            self.input_size,
+            self.hidden_size,
+            self.n_layers,
+            batch_first=batch_first,
+            dropout=dropout,
+        )
+
+    def forward(self, x, input_lengths=None):
+        # input_lengths = key_padd_mask.shape[1] - key_padd_mask.sum(dim=1)
+        if self.ignore_pad:
+            x = torch.nn.utils.rnn.pack_padded_sequence(
+                x, input_lengths, enforce_sorted=False
+            )
+
+        outputs, (ho, _) = self.lstm(x)
+
+        if self.ignore_pad:
+            outputs, _ = torch.nn.utils.rnn.pad_packed_sequence(outputs)
+
+        return outputs, ho
+
+
+class DecoderLSTM(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        output_size: int,
+        n_layers: int = 1,
+        dropout=0.1,
+        batch_first: bool = False,
+    ):
+        super(DecoderLSTM, self).__init__()
+        self.n_layers = n_layers
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.lstm = nn.LSTM(
+            self.hidden_size,
+            self.output_size,
+            self.n_layers,
+            batch_first=batch_first,
+            dropout=dropout,
+        )
+
+    def forward(self, x, last_hidden):
+        return self.lstm(x, last_hidden)
+
+
+class Seq2SeqLSTM(nn.Module):
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        output_size: int,
+        n_layers: int = 1,
+        dropout: float = 0.1,
+        ignore_pad: bool = True,
+        batch_first: bool = False,
+    ):
+        super(Seq2SeqLSTM, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.n_layers = n_layers
+        self.dropout = dropout
+        self.ignore_pad = ignore_pad
+        self.batch_first = batch_first
+        self.encoder = EncoderLSTM(
+            self.input_size,
+            self.hidden_size,
+            self.n_layers,
+            self.dropout,
+            self.ignore_pad,
+            self.batch_first,
+        )
+        self.decoder = DecoderLSTM(
+            self.hidden_size,
+            self.output_size,
+            self.n_layers,
+            self.dropout,
+            self.batch_first,
+        )
+
+    def forward(self, src, tgt, input_lengths):
+        max_seq_size = src.size(0)
+        outputs, ho = self.encoder(src, input_lengths)
+        decoder_hidden = (ho, torch.zeros(ho.shape))
+        for i in range(max_seq_size):
+            decoder_output, decoder_hidden = self.decoder(
+                tgt[i, :, :].unsqueeze(0), decoder_hidden
+            )
+
+        return decoder_hidden[0]
+
+
 class MMIL(pl.LightningModule):
     def __init__(
         self,
@@ -63,6 +173,7 @@ class MMIL(pl.LightningModule):
         language_model: str = settings.LANGUAGE_MODEL,
         vis_freeze_n_layers: int = 7,
         txt_freeze_n_layers: int = 7,
+        lstm: bool = False,
     ):
         super().__init__()
         self.scheduler_args = scheduler_args
