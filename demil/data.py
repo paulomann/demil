@@ -60,33 +60,36 @@ class DepressionCorpus(torch.utils.data.Dataset):
             image.close()
             img = self.transform(img)
             images.insert(0, img)
-            captions_tensors = self.tokenizer.batch_encode_plus(
-                captions,
-                add_special_tokens=True,
-                max_length=100,
-                padding="max_length",
-                return_tensors="pt",
-                return_attention_mask=True,
-                truncation=True,
-            )
+
+        captions_tensors = self.tokenizer(
+            captions,
+            add_special_tokens=True,
+            max_length=512,
+            padding="max_length",
+            return_tensors="pt",
+            return_attention_mask=True,
+            truncation=True,
+        )
         images = torch.stack(images)
+        captions_tensors["attention_mask"] = captions_tensors["attention_mask"].float()
+
         return (captions_tensors, images, score)
 
 
 def get_input_ids_attn_mask(
-    n_tokens: int, device: torch.device, dtype: torch.dtype
+    n_tokens: int, device: torch.device, i_ids_dtype: torch.dtype, attn_dtype: torch.dtype
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if settings.LANGUAGE_MODEL in settings.BERTIMBAU:
-        input_ids = torch.zeros(size=(1, n_tokens), device=device, dtype=dtype)
+        input_ids = torch.zeros(size=(1, n_tokens), device=device, dtype=i_ids_dtype)
         input_ids[0][0], input_ids[0][1] = 101, 102
-        attn_mask = torch.zeros(size=(1, n_tokens), device=device, dtype=dtype)
-        attn_mask[0][0], attn_mask[0][1] = 1, 1
+        attn_mask = torch.zeros(size=(1, n_tokens), device=device, dtype=attn_dtype)
+        attn_mask[0][0], attn_mask[0][1] = 1.0, 1.0
 
     elif settings.LANGUAGE_MODEL in settings.XLM:
-        input_ids = torch.ones(size=(1, n_tokens), device=device, dtype=dtype)
+        input_ids = torch.ones(size=(1, n_tokens), device=device, dtype=i_ids_dtype)
         input_ids[0][0], input_ids[0][1] = 0, 2
-        attn_mask = torch.zeros(size=(1, n_tokens), device=device, dtype=dtype)
-        attn_mask[0][0], attn_mask[0][1] = 1, 1
+        attn_mask = torch.zeros(size=(1, n_tokens), device=device, dtype=attn_dtype)
+        attn_mask[0][0], attn_mask[0][1] = 1.0, 1.0
     else:
         raise ValueError(
             f"Language model '{settings.LANGUAGE_MODEL}' is not currently supported."
@@ -124,7 +127,10 @@ def collate_fn(data: Tuple):
 
         for _ in range(0, fill):
             aux_input_ids, aux_attn_mask = get_input_ids_attn_mask(
-                n_tokens, device=input_ids.device, dtype=input_ids.dtype
+                n_tokens,
+                device=input_ids.device,
+                i_ids_dtype=input_ids.dtype,
+                attn_dtype=attn_mask.dtype,
             )
             input_ids_pad.append(aux_input_ids)
             attn_mask_pad.append(aux_attn_mask)

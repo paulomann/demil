@@ -45,7 +45,7 @@ from transformers import AutoTokenizer
     "--ignore-pad/--no-ignore-pad",
     is_flag=True,
     help=f"Ignore padding elements in the sequence. Does not work well with the --use-mask flag (it yields nan values in the training)",
-    default=True
+    default=True,
 )
 @click.option("--lr", default=2e-4, help=f"Learning Rate", type=click.FLOAT)
 @click.option("--b1", default=0.9, help=f"AdamW b1 beta parameter", type=click.FLOAT)
@@ -84,22 +84,22 @@ from transformers import AutoTokenizer
     type=click.STRING,
 )
 @click.option(
-    "--txt-freeze-n-layers",
-    default=10,
-    help=f"The number of layers to freeze in the textual encoder. Maximum is 11 (number of transformer layers)",
-    type=click.INT,
-)
-@click.option(
-    "--vis-freeze-n-layers",
-    default=7,
-    help=f"The number of layers to freeze in the visual encoder. Maximum is 10 (number of blocks in the ResNet network)",
-    type=click.INT,
-)
-@click.option(
     "--wandb/--no-wandb",
     is_flag=True,
     help=f"Whether to use wandb or not",
     default=True,
+)
+@click.option(
+    "--rnn-type",
+    default="transformer",
+    help=f"Huggingface name of the model to be used",
+    type=click.STRING,
+)
+@click.option(
+    "--shuffle/--no-shuffle",
+    is_flag=True,
+    help=f"Whether to shuffle dataset's dataloader or not.",
+    default=False,
 )
 def train(
     gpu: int,
@@ -123,9 +123,9 @@ def train(
     period: int,
     language_model: str,
     vis_model: str,
-    txt_freeze_n_layers: int,
-    vis_freeze_n_layers: int,
     wandb: bool,
+    rnn_type: str,
+    shuffle: bool,
 ):
     parameters = locals()
     print(f"====> Parameters: {parameters}")
@@ -140,7 +140,11 @@ def train(
     settings.LANGUAGE_MODEL = language_model
     tokenizer = AutoTokenizer.from_pretrained(language_model)
     train, val, test = get_dataloaders(
-        period=period, batch_size=bsz, collate_fn=collate_fn, tokenizer=tokenizer
+        period=period,
+        batch_size=bsz,
+        collate_fn=collate_fn,
+        shuffle=shuffle,
+        tokenizer=tokenizer,
     )
     gradient_accumulation_steps = 1
     t_total = (len(train) // gradient_accumulation_steps) * epochs
@@ -158,7 +162,7 @@ def train(
     parameters.update(scheduler_args)
     wandb_logger = WandbLogger(project="demil", name=name, config=parameters)
     checkpoint_callback = ModelCheckpoint(
-        monitor='val_acc',
+        monitor="val_acc",
         mode="max",
     )
     if not wandb:
@@ -172,10 +176,9 @@ def train(
         num_decoder_layers=num_decoder_layers,
         d_model=d_model,
         ignore_pad=ignore_pad,
-        vis_freeze_n_layers=vis_freeze_n_layers,
-        txt_freeze_n_layers=txt_freeze_n_layers,
         language_model=language_model,
         vis_model=vis_model,
+        rnn_type=rnn_type,
     )
     trainer = pl.Trainer(
         max_steps=t_total,
@@ -186,8 +189,7 @@ def train(
         gradient_clip_val=gradient_clip_val,
         log_every_n_steps=log_every_n_steps,
         checkpoint_callback=checkpoint_callback,
-        default_root_dir=settings.MODELS_PATH
-
+        default_root_dir=settings.MODELS_PATH,
     )
     trainer.fit(model, train, val)
     trainer.test(test_dataloaders=test)

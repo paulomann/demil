@@ -94,6 +94,7 @@ def get_dataloaders(
     period: Literal[60, 212, 365],
     batch_size: int,
     collate_fn,
+    shuffle: bool,
     tokenizer: PreTrainedTokenizer = None,
     regression: bool = False,
 ):
@@ -104,6 +105,7 @@ def get_dataloaders(
     test = DepressionCorpus(period, "test", tokenizer, regression)
     train_loader = DataLoader(
         train,
+        shuffle=shuffle,
         batch_size=batch_size,
         num_workers=settings.WORKERS,
         pin_memory=True,
