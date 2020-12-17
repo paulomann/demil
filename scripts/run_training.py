@@ -120,6 +120,12 @@ from transformers import AutoTokenizer
     help=f"Whether to use attention in the LSTM decoder or not.",
     default=False,
 )
+@click.option(
+    "--seq-len",
+    help=f"The maximum sequence length",
+    type=click.INT,
+    default=settings.MAX_SEQ_LENGTH
+)
 def train(
     gpu: int,
     name: str,
@@ -148,9 +154,11 @@ def train(
     seed: int,
     overfit: bool,
     attention: bool,
+    seq_len: int,
 ):
     seed_everything(seed)
     parameters = locals()
+    settings.MAX_SEQ_LENGTH = seq_len
     print(f"====> Parameters: {parameters}")
     available_periods = [365, 212, 60]
     if period not in available_periods:
