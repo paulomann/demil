@@ -3,6 +3,7 @@ import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning import seed_everything
 from typing import Literal, List
 from demil.utils import get_dataloaders
 from demil import settings
@@ -101,6 +102,24 @@ from transformers import AutoTokenizer
     help=f"Whether to shuffle dataset's dataloader or not.",
     default=False,
 )
+@click.option(
+    "--seed",
+    default=42,
+    help=f"Fix the seed of the random number generator.",
+    type=click.INT,
+)
+@click.option(
+    "--overfit",
+    help=f"Overfit the dataset in a predetermined number of batches",
+    type=click.INT,
+    default=0
+)
+@click.option(
+    "--attention/--no-attention",
+    is_flag=True,
+    help=f"Whether to use attention in the LSTM decoder or not.",
+    default=False,
+)
 def train(
     gpu: int,
     name: str,
@@ -126,7 +145,11 @@ def train(
     wandb: bool,
     rnn_type: str,
     shuffle: bool,
+    seed: int,
+    overfit: bool,
+    attention: bool,
 ):
+    seed_everything(seed)
     parameters = locals()
     print(f"====> Parameters: {parameters}")
     available_periods = [365, 212, 60]
@@ -179,8 +202,10 @@ def train(
         language_model=language_model,
         vis_model=vis_model,
         rnn_type=rnn_type,
+        attention=attention
     )
     trainer = pl.Trainer(
+        deterministic=True,
         max_steps=t_total,
         logger=wandb_logger if wandb else None,
         gpus=[gpu],
@@ -190,6 +215,7 @@ def train(
         log_every_n_steps=log_every_n_steps,
         checkpoint_callback=checkpoint_callback,
         default_root_dir=settings.MODELS_PATH,
+        overfit_batches=overfit
     )
     trainer.fit(model, train, val)
     trainer.test(test_dataloaders=test)

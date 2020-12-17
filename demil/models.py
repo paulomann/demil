@@ -25,6 +25,48 @@ def avg_pool(data, input_lens: torch.BoolTensor = None):
         return torch.sum(data, dim=1) / float(data.shape[1])
 
 
+class Attn(nn.Module):
+    def __init__(self, method, hidden_size):
+        super(Attn, self).__init__()
+        self.method = method
+        if self.method not in ["dot", "general", "concat"]:
+            raise ValueError(self.method, "is not an appropriate attention method.")
+        self.hidden_size = hidden_size
+        if self.method == "general":
+            self.attn = nn.Linear(self.hidden_size, hidden_size)
+        elif self.method == "concat":
+            self.attn = nn.Linear(self.hidden_size * 2, hidden_size)
+            self.v = nn.Parameter(torch.FloatTensor(hidden_size))
+
+    def dot_score(self, hidden, encoder_output):
+        return torch.sum(hidden * encoder_output, dim=2)
+
+    def general_score(self, hidden, encoder_output):
+        energy = self.attn(encoder_output)
+        return torch.sum(hidden * energy, dim=2)
+
+    def concat_score(self, hidden, encoder_output):
+        energy = self.attn(
+            torch.cat((hidden.expand(encoder_output.size(0), -1, -1), encoder_output), 2)
+        ).tanh()
+        return torch.sum(self.v * energy, dim=2)
+
+    def forward(self, hidden, encoder_outputs):
+        # Calculate the attention weights (energies) based on the given method
+        if self.method == "general":
+            attn_energies = self.general_score(hidden, encoder_outputs)
+        elif self.method == "concat":
+            attn_energies = self.concat_score(hidden, encoder_outputs)
+        elif self.method == "dot":
+            attn_energies = self.dot_score(hidden, encoder_outputs)
+
+        # Transpose max_length and batch_size dimensions
+        attn_energies = attn_energies.t()
+
+        # Return the softmax normalized probability scores (with added dimension)
+        return F.softmax(attn_energies, dim=1).unsqueeze(1)
+
+
 class PositionalEncoding(nn.Module):
     def __init__(
         self, d_model: int, dropout: float = 0.1, max_len: int = settings.MAX_SEQ_LENGTH
@@ -107,8 +149,64 @@ class DecoderLSTM(nn.Module):
             dropout=dropout,
         )
 
-    def forward(self, x, last_hidden):
+    def forward(self, x, last_hidden, encoder_outputs = None):
         return self.lstm(x, last_hidden)
+
+
+class AttnDecoderLSTM(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        output_size: int,
+        n_layers: int = 1,
+        dropout: float = 0.1,
+        batch_first: bool = False,
+    ):
+        super(AttnDecoderLSTM, self).__init__()
+
+        # From https://pytorch.org/tutorials/beginner/deploy_seq2seq_hybrid_frontend_tutorial.html
+        self.attn_model = "dot"
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.n_layers = n_layers
+        self.dropout = dropout
+
+        self.lstm = nn.LSTM(
+            self.hidden_size,
+            self.output_size,
+            self.n_layers,
+            batch_first=batch_first,
+            dropout=dropout,
+        )
+        self.concat = nn.Linear(hidden_size * 2, hidden_size)
+        self.out = nn.Linear(hidden_size, output_size)
+        self.attn = Attn(self.attn_model, hidden_size)
+
+    def forward(self, x, last_hidden, encoder_outputs):
+        # Note: we run this one step (word) at a time
+        # Get embedding of current input word
+        # Forward through unidirectional GRU
+        rnn_output, hidden = self.lstm(x, last_hidden)
+        # Calculate attention weights from the current GRU output
+        attn_weights = self.attn(rnn_output, encoder_outputs)
+        # Multiply attention weights to encoder outputs to get new "weighted sum" context vector
+        context = attn_weights.bmm(encoder_outputs.transpose(0, 1))
+        # Concatenate weighted context vector and GRU output using Luong eq. 5
+        rnn_output = rnn_output.squeeze(0)
+        context = context.squeeze(1)
+        concat_input = torch.cat((rnn_output, context), 1)
+        concat_output = torch.tanh(self.concat(concat_input))
+        # Predict next word using Luong eq. 6
+        output = self.out(concat_output)
+        output = F.softmax(output, dim=1)
+        # Return output and final hidden state
+        return output, hidden
+
+    def init_layers(self):
+        nn.init.uniform_(self.concat.weight.data, -0.1, 0.1)
+        nn.init.uniform_(self.out.weight.data, -0.1, 0.1)
+        nn.init.uniform_(self.concat.bias.data, -0.1, 0.1)
+        nn.init.uniform_(self.out.bias.data, -0.1, 0.1)
 
 
 class Seq2SeqLSTM(nn.Module):
@@ -122,6 +220,7 @@ class Seq2SeqLSTM(nn.Module):
         dropout: float = 0.1,
         ignore_pad: bool = True,
         batch_first: bool = False,
+        use_attention: bool = False
     ):
         super(Seq2SeqLSTM, self).__init__()
         self.input_size = input_size
@@ -140,7 +239,9 @@ class Seq2SeqLSTM(nn.Module):
             self.ignore_pad,
             self.batch_first,
         )
-        self.decoder = DecoderLSTM(
+        Decoder = AttnDecoderLSTM if use_attention else DecoderLSTM
+        print(f"Using {Decoder} decoder.")
+        self.decoder = Decoder(
             self.hidden_size,
             self.output_size,
             self.dec_n_layers,
@@ -151,11 +252,11 @@ class Seq2SeqLSTM(nn.Module):
     def forward(self, src, tgt, input_lengths):
         max_seq_size = src.size(0)
         # decoder_hidden = (ho, co)
-        outputs, decoder_hidden = self.encoder(src, input_lengths)
+        encoder_outputs, decoder_hidden = self.encoder(src, input_lengths)
         # co = torch.zeros(ho.shape, device=src.device, dtype=src.dtype)
         for i in range(max_seq_size):
             decoder_output, decoder_hidden = self.decoder(
-                tgt[i, :, :].unsqueeze(0), decoder_hidden
+                tgt[i, :, :].unsqueeze(0), decoder_hidden, encoder_outputs
             )
 
         return decoder_hidden[0][-1]
@@ -175,6 +276,7 @@ class MMIL(pl.LightningModule):
         vis_model: str = settings.VISUAL_MODEL,
         language_model: str = settings.LANGUAGE_MODEL,
         rnn_type: Literal["transformer", "lstm"] = "transformer",
+        attention: bool = False
     ):
         super().__init__()
         self.scheduler_args = scheduler_args
@@ -198,6 +300,7 @@ class MMIL(pl.LightningModule):
                 ignore_pad=self.ignore_pad,
                 enc_n_layers=num_encoder_layers,
                 dec_n_layers=num_decoder_layers,
+                use_attention=attention
             )
 
         else:
@@ -208,6 +311,7 @@ class MMIL(pl.LightningModule):
         self.text_encoder = AutoModel.from_pretrained(language_model)
         self.visual_encoder = getattr(models, vis_model)(pretrained=True)
         self.visual_encoder.fc = nn.Identity()
+        self.dropout = nn.Dropout(0.2)
         self.pos_encoder = PositionalEncoding(d_model)
         self.text_proj = nn.Linear(768, d_model)
         self.vis_proj = nn.Linear(512, d_model)
@@ -227,10 +331,8 @@ class MMIL(pl.LightningModule):
 
     def generate_square_subsequent_mask(self, sz, device):
         mask = (torch.triu(torch.ones(sz, sz, device=device)) == 1).transpose(0, 1)
-        mask = (
-            mask
-            .masked_fill(mask == 0, float("-inf"))
-            .masked_fill(mask == 1, float(0.0))
+        mask = mask.masked_fill(mask == 0, float("-inf")).masked_fill(
+            mask == 1, float(0.0)
         )
         return mask
 
@@ -241,13 +343,13 @@ class MMIL(pl.LightningModule):
             for input_ids, attn_mask in zip(src[0], src[1])
         ]
         textual_ftrs = torch.stack(textual_ftrs) * math.sqrt(self.d_model)
-        textual_ftrs = self.text_proj(textual_ftrs).transpose(0, 1)
+        textual_ftrs = self.dropout(self.text_proj(textual_ftrs).transpose(0, 1))
 
         visual_ftrs = [self.visual_encoder(user_imgs_seq) for user_imgs_seq in tgt]
         visual_ftrs = torch.stack(visual_ftrs) * math.sqrt(
             self.d_model
         )  # [BATCH, SEQ, EMB]
-        visual_ftrs = self.vis_proj(visual_ftrs).transpose(0, 1)  # [SEQ, BATCH, EMB]
+        visual_ftrs = self.dropout(self.vis_proj(visual_ftrs).transpose(0, 1))  # [SEQ, BATCH, EMB]
 
         if not self.ignore_pad:
             key_padd_mask = None
@@ -304,16 +406,36 @@ class MMIL(pl.LightningModule):
 
         with torch.no_grad():
             preds = F.softmax(logits, dim=-1).argmax(dim=-1)
+            acc = ((preds == labels).sum().float()) / len(labels)
             print()
             print(f"===>TRAIN PREDS: {preds}")
             print(f"===>TRAIN LABEL: {labels}")
+            print(f"===>TRAIN ACCUR: {acc}")
             print()
-            acc = ((preds == labels).sum().float()) / len(labels)
 
         # self.logger.experiment.log({"train_loss": loss})
         # self.log("train_loss", loss)
+        # self.log_dict({"train_loss": loss, "train_acc": acc})
+        preds = preds.unsqueeze(0) if preds.dim() == 0 else preds
+        return {"loss": loss, "preds": preds, "targets": labels}
+
+    def training_epoch_end(self, outs):
+        preds = []
+        targets = []
+        losses = []
+        for out in outs:
+            losses.append(out["loss"] * len(out["targets"]))
+            targets.append(out["targets"])
+            preds.append(out["preds"])
+
+        preds = torch.cat(preds)
+        targets = torch.cat(targets)
+        loss = sum(losses) / len(targets)
+        acc = ((preds == targets).sum().float()) / len(targets)
+        print()
+        print(f"===>TRAIN BATCH ACCUR: {acc}")
+        print()
         self.log_dict({"train_loss": loss, "train_acc": acc})
-        return {"loss": loss, "train_acc": acc}
 
     def validation_step(self, val_batch, batch_idx):
         *_, labels = val_batch
@@ -325,16 +447,36 @@ class MMIL(pl.LightningModule):
         # self.logger.experiment.log({"val_loss": loss})
         # self.log("val_loss", loss)
         preds = F.softmax(logits, dim=-1).argmax(dim=-1)
+        acc = ((preds == labels).sum().float()) / len(labels)
         print()
         print(f"===>VAL PREDS: {preds}")
         print(f"===>VAL LABEL: {labels}")
+        print(f"===>VAL ACCUR: {acc}")
         print()
-        acc = ((preds == labels).sum().float()) / len(labels)
 
         # self.logger.experiment.log({"train_loss": loss})
         # self.log("train_loss", loss)
+        # self.log_dict({"val_loss": loss, "val_acc": acc})
+        preds = preds.unsqueeze(0) if preds.dim() == 0 else preds
+        return {"val_loss": loss, "preds": preds, "targets": labels}
+
+    def validation_epoch_end(self, outs):
+        preds = []
+        targets = []
+        losses = []
+        for out in outs:
+            losses.append(out["val_loss"] * len(out["targets"]))
+            targets.append(out["targets"])
+            preds.append(out["preds"])
+
+        preds = torch.cat(preds)
+        targets = torch.cat(targets)
+        loss = sum(losses) / len(targets)
+        acc = ((preds == targets).sum().float()) / len(targets)
+        print()
+        print(f"===>VAL BATCH ACCUR: {acc}")
+        print()
         self.log_dict({"val_loss": loss, "val_acc": acc})
-        return {"val_loss": loss, "val_acc": acc}
 
     def test_step(self, test_batch, batch_idx):
         *_, labels = test_batch
@@ -376,15 +518,18 @@ class MMIL(pl.LightningModule):
         self.log_dict({"precision": precision, "recall": recall, "fscore": fscore})
 
     def init_layers(self):
-        # nn.init.uniform_(self.text_proj.weight.data, -0.1, 0.1)
-        # nn.init.uniform_(self.vis_proj.weight.data, -0.1, 0.1)
-        # nn.init.uniform_(self.classifier.weight.data, -0.1, 0.1)
-        nn.init.normal_(self.text_proj.weight.data, 0, 0.02)
-        nn.init.normal_(self.vis_proj.weight.data, 0, 0.02)
-        nn.init.normal_(self.classifier.weight.data, 0, 0.02)
-        nn.init.zeros_(self.text_proj.bias.data)
-        nn.init.zeros_(self.vis_proj.bias.data)
-        nn.init.zeros_(self.classifier.bias.data)
+        nn.init.uniform_(self.text_proj.weight.data, -0.1, 0.1)
+        nn.init.uniform_(self.vis_proj.weight.data, -0.1, 0.1)
+        nn.init.uniform_(self.classifier.weight.data, -0.1, 0.1)
+        # nn.init.normal_(self.text_proj.weight.data, 0, 0.02)
+        # nn.init.normal_(self.vis_proj.weight.data, 0, 0.02)
+        # nn.init.normal_(self.classifier.weight.data, 0, 0.02)
+        nn.init.uniform_(self.text_proj.bias.data, -0.1, 0.1)
+        nn.init.uniform_(self.vis_proj.bias.data, -0.1, 0.1)
+        nn.init.uniform_(self.classifier.bias.data, -0.1, 0.1)
+        # nn.init.zeros_(self.text_proj.bias.data)
+        # nn.init.zeros_(self.vis_proj.bias.data)
+        # nn.init.zeros_(self.classifier.bias.data)
 
         if self.rnn_type == "lstm":
             for name, param in self.rnn.named_parameters():
