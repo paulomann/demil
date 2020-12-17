@@ -3,6 +3,7 @@ import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning import seed_everything
 from typing import Literal, List
 from demil.utils import get_dataloaders
 from demil import settings
@@ -45,7 +46,7 @@ from transformers import AutoTokenizer
     "--ignore-pad/--no-ignore-pad",
     is_flag=True,
     help=f"Ignore padding elements in the sequence. Does not work well with the --use-mask flag (it yields nan values in the training)",
-    default=True
+    default=True,
 )
 @click.option("--lr", default=2e-4, help=f"Learning Rate", type=click.FLOAT)
 @click.option("--b1", default=0.9, help=f"AdamW b1 beta parameter", type=click.FLOAT)
@@ -84,22 +85,40 @@ from transformers import AutoTokenizer
     type=click.STRING,
 )
 @click.option(
-    "--txt-freeze-n-layers",
-    default=10,
-    help=f"The number of layers to freeze in the textual encoder. Maximum is 11 (number of transformer layers)",
-    type=click.INT,
-)
-@click.option(
-    "--vis-freeze-n-layers",
-    default=7,
-    help=f"The number of layers to freeze in the visual encoder. Maximum is 10 (number of blocks in the ResNet network)",
-    type=click.INT,
-)
-@click.option(
     "--wandb/--no-wandb",
     is_flag=True,
     help=f"Whether to use wandb or not",
     default=True,
+)
+@click.option(
+    "--rnn-type",
+    default="transformer",
+    help=f"Huggingface name of the model to be used",
+    type=click.STRING,
+)
+@click.option(
+    "--shuffle/--no-shuffle",
+    is_flag=True,
+    help=f"Whether to shuffle dataset's dataloader or not.",
+    default=False,
+)
+@click.option(
+    "--seed",
+    default=42,
+    help=f"Fix the seed of the random number generator.",
+    type=click.INT,
+)
+@click.option(
+    "--overfit",
+    help=f"Overfit the dataset in a predetermined number of batches",
+    type=click.INT,
+    default=0
+)
+@click.option(
+    "--attention/--no-attention",
+    is_flag=True,
+    help=f"Whether to use attention in the LSTM decoder or not.",
+    default=False,
 )
 def train(
     gpu: int,
@@ -123,10 +142,14 @@ def train(
     period: int,
     language_model: str,
     vis_model: str,
-    txt_freeze_n_layers: int,
-    vis_freeze_n_layers: int,
     wandb: bool,
+    rnn_type: str,
+    shuffle: bool,
+    seed: int,
+    overfit: bool,
+    attention: bool,
 ):
+    seed_everything(seed)
     parameters = locals()
     print(f"====> Parameters: {parameters}")
     available_periods = [365, 212, 60]
@@ -140,7 +163,11 @@ def train(
     settings.LANGUAGE_MODEL = language_model
     tokenizer = AutoTokenizer.from_pretrained(language_model)
     train, val, test = get_dataloaders(
-        period=period, batch_size=bsz, collate_fn=collate_fn, tokenizer=tokenizer
+        period=period,
+        batch_size=bsz,
+        collate_fn=collate_fn,
+        shuffle=shuffle,
+        tokenizer=tokenizer,
     )
     gradient_accumulation_steps = 1
     t_total = (len(train) // gradient_accumulation_steps) * epochs
@@ -158,7 +185,7 @@ def train(
     parameters.update(scheduler_args)
     wandb_logger = WandbLogger(project="demil", name=name, config=parameters)
     checkpoint_callback = ModelCheckpoint(
-        monitor='val_acc',
+        monitor="val_acc",
         mode="max",
     )
     if not wandb:
@@ -172,12 +199,13 @@ def train(
         num_decoder_layers=num_decoder_layers,
         d_model=d_model,
         ignore_pad=ignore_pad,
-        vis_freeze_n_layers=vis_freeze_n_layers,
-        txt_freeze_n_layers=txt_freeze_n_layers,
         language_model=language_model,
         vis_model=vis_model,
+        rnn_type=rnn_type,
+        attention=attention
     )
     trainer = pl.Trainer(
+        deterministic=True,
         max_steps=t_total,
         logger=wandb_logger if wandb else None,
         gpus=[gpu],
@@ -186,8 +214,8 @@ def train(
         gradient_clip_val=gradient_clip_val,
         log_every_n_steps=log_every_n_steps,
         checkpoint_callback=checkpoint_callback,
-        default_root_dir=settings.MODELS_PATH
-
+        default_root_dir=settings.MODELS_PATH,
+        overfit_batches=overfit
     )
     trainer.fit(model, train, val)
     trainer.test(test_dataloaders=test)
