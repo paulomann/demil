@@ -5,9 +5,7 @@ from typing import Literal, Tuple, Dict, List
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
-from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizer, AutoTokenizer
-from demil.data import DepressionCorpus
 from demil import settings
 
 
@@ -88,42 +86,3 @@ def get_statistics_for_posts():
         print(
             f"""==== Report ({p}) ====\nAverage: {np.mean(qty)}\nStandard Deviation: {np.std(qty)}\n# Users: {len(all_users)}\nMax: {np.max(qty)}"""
         )
-
-
-def get_dataloaders(
-    period: Literal[60, 212, 365],
-    batch_size: int,
-    collate_fn,
-    shuffle: bool,
-    tokenizer: PreTrainedTokenizer = None,
-    regression: bool = False,
-):
-    if tokenizer is None:
-        tokenizer = AutoTokenizer.from_pretrained(settings.LANGUAGE_MODEL)
-    train = DepressionCorpus(period, "train", tokenizer, regression)
-    val = DepressionCorpus(period, "val", tokenizer, regression)
-    test = DepressionCorpus(period, "test", tokenizer, regression)
-    train_loader = DataLoader(
-        train,
-        shuffle=shuffle,
-        batch_size=batch_size,
-        num_workers=settings.WORKERS,
-        pin_memory=True,
-        collate_fn=collate_fn,
-    )
-    val_loader = DataLoader(
-        val,
-        batch_size=batch_size,
-        num_workers=settings.WORKERS,
-        pin_memory=True,
-        collate_fn=collate_fn,
-    )
-    test_loader = DataLoader(
-        test,
-        batch_size=batch_size,
-        num_workers=settings.WORKERS,
-        pin_memory=True,
-        collate_fn=collate_fn,
-    )
-    return train_loader, val_loader, test_loader
-

@@ -1,10 +1,84 @@
 import torch
-from typing import Literal, Tuple
-from transformers import PreTrainedTokenizer
+from torch.utils.data import DataLoader
+from typing import Literal, Tuple, List
+from transformers import PreTrainedTokenizer, AutoTokenizer
 from torchvision import transforms
 from PIL import Image
-import demil.utils as util
 from demil import settings
+import demil.utils as utils
+from demil.utils import User
+import pandas as pd
+import scipy.io as sio
+
+
+class AVECCorpus(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        dataset_type: Literal["train", "val", "test"],
+        max_seq_length: int = -1,
+    ):
+        self.dataset_type = dataset_type
+        self.max_seq_length = max_seq_length
+        self.audio, self.video, self.labels, self.size = self.load_datasets(
+            self.dataset_type
+        )
+
+    def __len__(self):
+        return self.size
+
+    def load_datasets(
+        self, dataset_type
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor], torch.Tensor, int]:
+        metadata = pd.read_csv(settings.AVEC_METADATA, encoding=settings.encoding)
+
+        if dataset_type == "test":
+            audio_files = list(settings.AVEC_AUDIO.rglob("test*_densenet*"))
+            video_files = list(settings.AVEC_VIDEO.rglob("test*_ResNet*"))
+        elif dataset_type == "val":
+            audio_files = list(settings.AVEC_AUDIO.rglob("development*_densenet*"))
+            video_files = list(settings.AVEC_VIDEO.rglob("development*_ResNet*"))
+        elif dataset_type == "train":
+            audio_files = list(settings.AVEC_AUDIO.rglob("training*_densenet*"))
+            video_files = list(settings.AVEC_VIDEO.rglob("training*_ResNet*"))
+        else:
+            raise ValueError(f"There is no split called {dataset_type}")
+
+        video_files = sorted(video_files)
+        audio_files = sorted(audio_files)
+
+        if dataset_type != "test":
+            labels = []
+            for path in video_files:
+                name = "_".join(path.name.split("_")[:2])
+                labels.append(
+                    metadata.loc[metadata["Participant_ID"] == name]["PHQ_Binary"].values[0]
+                )
+            labels = torch.tensor(labels).long()
+            assert len(video_files) == len(audio_files) == len(labels)
+        else:
+            labels = torch.tensor([]).long()
+            assert len(video_files) == len(audio_files)
+
+        data_size = len(video_files)
+        audio_data = []
+        video_data = []
+        for audio_file, video_file in zip(audio_files, video_files):
+            csv = pd.read_csv(audio_file, encoding=settings.encoding)
+            audio_embeddings = torch.from_numpy(csv.to_numpy()[:, 2:].astype("float32"))
+            audio_data.append(audio_embeddings)
+            video_embeddings = torch.from_numpy(
+                sio.loadmat(video_file)["feature"].astype("float32")
+            )
+            video_data.append(video_embeddings)
+
+        return audio_data, video_data, labels, data_size
+
+    def __getitem__(self, i):
+        return (
+            self.audio[i][: self.max_seq_length, :],
+            self.video[i][: self.max_seq_length, :],
+            self.labels[i] if self.dataset_type != "test" else self.labels,
+        )
 
 
 class DepressionCorpus(torch.utils.data.Dataset):
@@ -16,7 +90,7 @@ class DepressionCorpus(torch.utils.data.Dataset):
         regression: bool = False,
         max_seq_length: int = settings.MAX_SEQ_LENGTH,
     ):
-        self.dataset = util.get_dataset(period, dataset_type)
+        self.dataset = get_dataset(period, dataset_type)
         self.dataset_type = dataset_type
         self.tokenizer = tokenizer
         self.regression = regression
@@ -148,3 +222,49 @@ def collate_fn(data: Tuple):
         torch.stack(batch_post_attn_mask),
         labels,
     )
+
+
+def get_dataset(
+    period: Literal[60, 212, 365], dataset: Literal["train", "val", "test"]
+) -> List[User]:
+    data = utils.load_dataframes(period, dataset)
+    data = utils.get_users_info(utils.sort_by_date(data))
+    return data
+
+
+def get_dataloaders(
+    period: Literal[60, 212, 365],
+    batch_size: int,
+    collate_fn,
+    shuffle: bool,
+    tokenizer: PreTrainedTokenizer = None,
+    regression: bool = False,
+):
+    if tokenizer is None:
+        tokenizer = AutoTokenizer.from_pretrained(settings.LANGUAGE_MODEL)
+    train = DepressionCorpus(period, "train", tokenizer, regression)
+    val = DepressionCorpus(period, "val", tokenizer, regression)
+    test = DepressionCorpus(period, "test", tokenizer, regression)
+    train_loader = DataLoader(
+        train,
+        shuffle=shuffle,
+        batch_size=batch_size,
+        num_workers=settings.WORKERS,
+        pin_memory=True,
+        collate_fn=collate_fn,
+    )
+    val_loader = DataLoader(
+        val,
+        batch_size=batch_size,
+        num_workers=settings.WORKERS,
+        pin_memory=True,
+        collate_fn=collate_fn,
+    )
+    test_loader = DataLoader(
+        test,
+        batch_size=batch_size,
+        num_workers=settings.WORKERS,
+        pin_memory=True,
+        collate_fn=collate_fn,
+    )
+    return train_loader, val_loader, test_loader

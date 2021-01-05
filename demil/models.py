@@ -276,13 +276,15 @@ class MMIL(pl.LightningModule):
         vis_model: str = settings.VISUAL_MODEL,
         language_model: str = settings.LANGUAGE_MODEL,
         rnn_type: Literal["transformer", "lstm"] = "transformer",
-        attention: bool = False
+        attention: bool = False,
+        weight: bool = False
     ):
         super().__init__()
         self.scheduler_args = scheduler_args
         self.optimizer_args = optimizer_args
         self.ignore_pad = ignore_pad
         self.d_model = d_model
+        self.weight = weight
         if rnn_type == "transformer":
 
             self.rnn = nn.Transformer(
@@ -401,7 +403,11 @@ class MMIL(pl.LightningModule):
         *_, labels = train_batch
         logits = self(train_batch)
         if labels is not None:
-            loss_fct = nn.CrossEntropyLoss()
+            if self.weight:
+                w = torch.tensor([0.6279, 0.3721], dtype=logits.dtype, device=logits.device)
+                loss_fct = nn.CrossEntropyLoss(weight=weight)
+            else:
+                loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(logits.view(-1, 2), labels.view(-1))
 
         with torch.no_grad():
@@ -441,7 +447,11 @@ class MMIL(pl.LightningModule):
         *_, labels = val_batch
         logits = self(val_batch)
         if labels is not None:
-            loss_fct = nn.CrossEntropyLoss()
+            if self.weight:
+                w = torch.tensor([0.6279, 0.3721], dtype=logits.dtype, device=logits.device)
+                loss_fct = nn.CrossEntropyLoss(weight=weight)
+            else:
+                loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(logits.view(-1, 2), labels.view(-1))
 
         # self.logger.experiment.log({"val_loss": loss})

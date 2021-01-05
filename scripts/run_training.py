@@ -5,7 +5,7 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning import seed_everything
 from typing import Literal, List
-from demil.utils import get_dataloaders
+from demil.data import get_dataloaders
 from demil import settings
 from demil.data import collate_fn
 from demil.models import MMIL
@@ -126,6 +126,12 @@ from transformers import AutoTokenizer
     type=click.INT,
     default=settings.MAX_SEQ_LENGTH
 )
+@click.option(
+    "--weight/--no-weight",
+    is_flag=True,
+    help=f"Whether to use weighted loss function or not.",
+    default=False,
+)
 def train(
     gpu: int,
     name: str,
@@ -155,6 +161,7 @@ def train(
     overfit: bool,
     attention: bool,
     seq_len: int,
+    weight: bool,
 ):
     seed_everything(seed)
     parameters = locals()
@@ -210,7 +217,8 @@ def train(
         language_model=language_model,
         vis_model=vis_model,
         rnn_type=rnn_type,
-        attention=attention
+        attention=attention,
+        weight=weight
     )
     trainer = pl.Trainer(
         deterministic=True,
