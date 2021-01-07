@@ -132,6 +132,12 @@ from transformers import AutoTokenizer
     help=f"Whether to use weighted loss function or not.",
     default=False,
 )
+@click.option(
+    "--teacher-force",
+    help=f"Whether to use teacher forcing or not in the Seq2seq LSTM training.",
+    default=0.0,
+    type=click.FLOAT,
+)
 def train(
     gpu: int,
     name: str,
@@ -162,6 +168,7 @@ def train(
     attention: bool,
     seq_len: int,
     weight: bool,
+    teacher_force: float,
 ):
     seed_everything(seed)
     parameters = locals()
@@ -218,7 +225,8 @@ def train(
         vis_model=vis_model,
         rnn_type=rnn_type,
         attention=attention,
-        weight=weight
+        weight=weight,
+        teacher_force=teacher_force
     )
     trainer = pl.Trainer(
         deterministic=True,

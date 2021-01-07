@@ -119,6 +119,7 @@ class DepressionCorpus(torch.utils.data.Dataset):
     def __getitem__(self, i):
         CAPTION_IDX = 0
         IMG_PATH_IDX = 1
+        TIMESTAMP_IDX = 2
         user = self.dataset[i]
         posts = user.posts
         score = self.get_score(user.bdi)

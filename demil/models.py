@@ -11,6 +11,7 @@ import math
 from typing import Dict, Literal
 import wandb
 from sklearn.metrics import precision_recall_fscore_support
+import random
 
 
 def avg_pool(data, input_lens: torch.BoolTensor = None):
@@ -23,6 +24,13 @@ def avg_pool(data, input_lens: torch.BoolTensor = None):
         )
     else:
         return torch.sum(data, dim=1) / float(data.shape[1])
+
+
+def init_weights(*models):
+    for model in models:
+        for name, param in model.named_parameters():
+            if "weight" in name or "bias" in name:
+                param.data.uniform_(-0.1, 0.1)
 
 
 class Attn(nn.Module):
@@ -150,7 +158,7 @@ class DecoderLSTM(nn.Module):
         )
 
     def forward(self, x, last_hidden, encoder_outputs = None):
-        return self.lstm(x, last_hidden)
+        return self.lstm(x, last_hidden), None
 
 
 class AttnDecoderLSTM(nn.Module):
@@ -197,16 +205,13 @@ class AttnDecoderLSTM(nn.Module):
         concat_input = torch.cat((rnn_output, context), 1)
         concat_output = torch.tanh(self.concat(concat_input))
         # Predict next word using Luong eq. 6
-        output = self.out(concat_output)
-        output = F.softmax(output, dim=1)
+        # output = self.out(concat_output).unsqueeze(0)
+        # Lembrar que se der problema voltar com a linha de baixo e tirar o unsqueeze(0) da linha acima
+        output = self.out(concat_output).unsqueeze(0)
+        # output = F.softmax(output, dim=1).unsqueeze(0)
         # Return output and final hidden state
-        return output, hidden
+        return output, hidden, attn_weights
 
-    def init_layers(self):
-        nn.init.uniform_(self.concat.weight.data, -0.1, 0.1)
-        nn.init.uniform_(self.out.weight.data, -0.1, 0.1)
-        nn.init.uniform_(self.concat.bias.data, -0.1, 0.1)
-        nn.init.uniform_(self.out.bias.data, -0.1, 0.1)
 
 
 class Seq2SeqLSTM(nn.Module):
@@ -220,7 +225,8 @@ class Seq2SeqLSTM(nn.Module):
         dropout: float = 0.1,
         ignore_pad: bool = True,
         batch_first: bool = False,
-        use_attention: bool = False
+        use_attention: bool = False,
+        teacher_force: float = 0.0,
     ):
         super(Seq2SeqLSTM, self).__init__()
         self.input_size = input_size
@@ -231,6 +237,7 @@ class Seq2SeqLSTM(nn.Module):
         self.dropout = dropout
         self.ignore_pad = ignore_pad
         self.batch_first = batch_first
+        self.teacher_force = teacher_force
         self.encoder = EncoderLSTM(
             self.input_size,
             self.hidden_size,
@@ -249,18 +256,45 @@ class Seq2SeqLSTM(nn.Module):
             self.batch_first,
         )
 
+    # def forward(self, src, tgt, input_lengths):
+    #     max_seq_size = src.size(0)
+    #     # decoder_hidden = (ho, co)
+    #     encoder_outputs, decoder_hidden = self.encoder(src, input_lengths)
+    #     # co = torch.zeros(ho.shape, device=src.device, dtype=src.dtype)
+    #     curr_input = tgt[0, :, :].unsqueeze(0)
+    #     attn_weights = []
+    #     for i in range(1, max_seq_size):
+    #         decoder_output, decoder_hidden, attn_w = self.decoder(
+    #             curr_input, decoder_hidden, encoder_outputs
+    #         )
+    #         # attn_weights.append(attn_w.detach().squeeze())
+    #         teacher_force = random.random() < self.teacher_force
+    #         curr_input = tgt[i, :, :].unsqueeze(0) if teacher_force else decoder_output
+    #         # curr_input = tgt[i, :, :].unsqueeze(0)
+
+    #     # attn_weights.append(attn_w.detach().squeeze())
+
+    #     return decoder_hidden[0][-1].squeeze(), None
+    #     # return decoder_output[-1], torch.stack(attn_weights, dim=-1).transpose(1, 2)
+
     def forward(self, src, tgt, input_lengths):
         max_seq_size = src.size(0)
-        # decoder_hidden = (ho, co)
         encoder_outputs, decoder_hidden = self.encoder(src, input_lengths)
-        # co = torch.zeros(ho.shape, device=src.device, dtype=src.dtype)
-        for i in range(max_seq_size):
-            decoder_output, decoder_hidden = self.decoder(
-                tgt[i, :, :].unsqueeze(0), decoder_hidden, encoder_outputs
+        curr_input = tgt[0, :, :].unsqueeze(0)
+        attn_weights = []
+        for i in range(1, max_seq_size):
+            decoder_output, decoder_hidden, attn_w = self.decoder(
+                curr_input, decoder_hidden, encoder_outputs
             )
+            # attn_weights.append(attn_w.detach().squeeze())
+            teacher_force = random.random() < self.teacher_force
+            curr_input = tgt[i, :, :].unsqueeze(0) if teacher_force else decoder_output
+            # curr_input = tgt[i, :, :].unsqueeze(0)
 
-        return decoder_hidden[0][-1]
+        # attn_weights.append(attn_w.detach().squeeze())
 
+        return decoder_hidden[0][-1].squeeze(), None
+        # return decoder_output[-1], torch.stack(attn_weights, dim=-1).transpose(1, 2)
 
 class MMIL(pl.LightningModule):
     def __init__(
@@ -277,7 +311,8 @@ class MMIL(pl.LightningModule):
         language_model: str = settings.LANGUAGE_MODEL,
         rnn_type: Literal["transformer", "lstm"] = "transformer",
         attention: bool = False,
-        weight: bool = False
+        weight: bool = False,
+        teacher_force: float = 0.0,
     ):
         super().__init__()
         self.scheduler_args = scheduler_args
@@ -302,7 +337,8 @@ class MMIL(pl.LightningModule):
                 ignore_pad=self.ignore_pad,
                 enc_n_layers=num_encoder_layers,
                 dec_n_layers=num_decoder_layers,
-                use_attention=attention
+                use_attention=attention,
+                teacher_force=teacher_force,
             )
 
         else:
@@ -318,12 +354,10 @@ class MMIL(pl.LightningModule):
         self.text_proj = nn.Linear(768, d_model)
         self.vis_proj = nn.Linear(512, d_model)
         self.classifier = nn.Linear(d_model, 2)
-        self.init_layers()
-        # self.vis_norm = nn.LayerNorm([settings.MAX_SEQ_LENGTH, 512])
-        # self.txt_norm = nn.LayerNorm([settings.MAX_SEQ_LENGTH, 768])
-        self.vis_norm = nn.Identity()
-        self.txt_norm = nn.Identity()
+        self.vis_norm = nn.LayerNorm([settings.MAX_SEQ_LENGTH, 512])
+        self.txt_norm = nn.LayerNorm([settings.MAX_SEQ_LENGTH, 768])
         self.relu = nn.ReLU()
+        self.init_layers()
         self.mask = None
         self.use_mask = use_mask
         self.freeze_layers(
@@ -353,7 +387,7 @@ class MMIL(pl.LightningModule):
         )  # [BATCH, SEQ, EMB]
         visual_ftrs = self.dropout(self.vis_proj(visual_ftrs).transpose(0, 1))  # [SEQ, BATCH, EMB]
 
-        if not self.ignore_pad:
+        if not self.ignore_pad: 
             key_padd_mask = None
 
         if self.mask is None and self.use_mask:
@@ -373,10 +407,8 @@ class MMIL(pl.LightningModule):
                 memory_key_padding_mask=key_padd_mask,
             ).transpose(0, 1)
 
-            if self.ignore_pad:
-                pooled_out = avg_pool(hidden)
-            else:
-                pooled_out = avg_pool(hidden, key_padd_mask)
+            pooled_out = avg_pool(hidden, key_padd_mask)
+            attn_weights = None
 
         elif self.rnn_type == "lstm":
 
@@ -385,14 +417,14 @@ class MMIL(pl.LightningModule):
                 if self.ignore_pad
                 else None
             )
-            pooled_out = self.rnn(textual_ftrs, visual_ftrs, input_lengths).squeeze()
+            pooled_out, attn_weights = self.rnn(textual_ftrs, visual_ftrs, input_lengths)
 
         else:
             raise NotImplementedError(f"The rnn type {self.rnn_type} is not implemented")
 
         logits = self.classifier(pooled_out)
 
-        return logits
+        return logits, attn_weights
 
     def configure_optimizers(self):
         optimizer = AdamW(self.parameters(), **self.optimizer_args)
@@ -401,11 +433,11 @@ class MMIL(pl.LightningModule):
 
     def training_step(self, train_batch, batch_idx):
         *_, labels = train_batch
-        logits = self(train_batch)
+        logits, _ = self(train_batch)
         if labels is not None:
             if self.weight:
                 w = torch.tensor([0.6279, 0.3721], dtype=logits.dtype, device=logits.device)
-                loss_fct = nn.CrossEntropyLoss(weight=weight)
+                loss_fct = nn.CrossEntropyLoss(weight=w)
             else:
                 loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(logits.view(-1, 2), labels.view(-1))
@@ -445,11 +477,11 @@ class MMIL(pl.LightningModule):
 
     def validation_step(self, val_batch, batch_idx):
         *_, labels = val_batch
-        logits = self(val_batch)
+        logits, _ = self(val_batch)
         if labels is not None:
             if self.weight:
                 w = torch.tensor([0.6279, 0.3721], dtype=logits.dtype, device=logits.device)
-                loss_fct = nn.CrossEntropyLoss(weight=weight)
+                loss_fct = nn.CrossEntropyLoss(weight=w)
             else:
                 loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(logits.view(-1, 2), labels.view(-1))
@@ -490,23 +522,46 @@ class MMIL(pl.LightningModule):
 
     def test_step(self, test_batch, batch_idx):
         *_, labels = test_batch
-        logits = self(test_batch)
+        logits, attn_weights = self(test_batch)
         preds = F.softmax(logits, dim=-1).argmax(dim=-1)
         probas = F.softmax(logits, dim=-1)
 
+        if labels is not None:
+            if self.weight:
+                w = torch.tensor([0.6279, 0.3721], dtype=logits.dtype, device=logits.device)
+                loss_fct = nn.CrossEntropyLoss(weight=w, reduction='none')
+            else:
+                loss_fct = nn.CrossEntropyLoss(reduction='none')
+            loss = loss_fct(logits.view(-1, 2), labels.view(-1)).cpu()
+
+        attn_weights = attn_weights.cpu().squeeze() if attn_weights is not None else None
         labels = labels.cpu().tolist()
         probas = probas.cpu().tolist()
         preds = preds.cpu().tolist()
-        return (labels, probas, preds)
+        return (labels, probas, preds, attn_weights, loss)
 
     def test_epoch_end(self, outputs):
         labels = []
         probas = []
         preds = []
+        losses = []
+        source_indices = []
+        target_indices = []
         for i in outputs:
             labels.extend(i[0])
             probas.extend(i[1])
             preds.extend(i[2])
+        #     vals , source_seq_idx = i[3].topk(k=3, dim=2)
+        #     target_seq_idx = vals.sum(dim=2).argmax(dim=1)
+        #     target_indices.append(target_seq_idx)
+        #     source_indices.append(source_seq_idx)
+        #     losses.append(i[4])
+        
+        # source_indices = torch.cat(source_indices, dim=0)
+        # target_indices = torch.cat(target_indices, dim=0)
+        # losses = torch.cat(losses)
+        # _, largest_losses = losses.topk(k=2)
+        # _, lowest_losses = losses.topk(k=2, largest=False)
 
         self.logger.experiment.log(
             {
@@ -528,23 +583,27 @@ class MMIL(pl.LightningModule):
         self.log_dict({"precision": precision, "recall": recall, "fscore": fscore})
 
     def init_layers(self):
-        nn.init.uniform_(self.text_proj.weight.data, -0.1, 0.1)
-        nn.init.uniform_(self.vis_proj.weight.data, -0.1, 0.1)
-        nn.init.uniform_(self.classifier.weight.data, -0.1, 0.1)
+        init_weights(self.text_proj, self.vis_proj, self.classifier, self.vis_norm, self.txt_norm)
+        # nn.init.constant_(self.classifier.weight.data, 0.42)
+
+        # nn.init.uniform_(self.text_proj.weight.data, -0.1, 0.1)
+        # nn.init.uniform_(self.text_proj.bias.data, -0.1, 0.1)
+
         # nn.init.normal_(self.text_proj.weight.data, 0, 0.02)
-        # nn.init.normal_(self.vis_proj.weight.data, 0, 0.02)
-        # nn.init.normal_(self.classifier.weight.data, 0, 0.02)
-        nn.init.uniform_(self.text_proj.bias.data, -0.1, 0.1)
-        nn.init.uniform_(self.vis_proj.bias.data, -0.1, 0.1)
-        nn.init.uniform_(self.classifier.bias.data, -0.1, 0.1)
         # nn.init.zeros_(self.text_proj.bias.data)
-        # nn.init.zeros_(self.vis_proj.bias.data)
-        # nn.init.zeros_(self.classifier.bias.data)
 
         if self.rnn_type == "lstm":
             for name, param in self.rnn.named_parameters():
                 if "weight" in name or "bias" in name:
                     param.data.uniform_(-0.1, 0.1)
+
+        elif self.rnn_type == "transformer":
+            for name, param in self.rnn.named_parameters():
+                if "weight" in name:
+                    if param.dim() > 1:
+                        nn.init.xavier_uniform_(param.data)
+                elif "bias" in name:
+                    nn.init.constant_(param.data, 0.0)
 
     def freeze_layers(self, text_encoder: AutoModel, vis_encoder: ResNet):
         # visual, from https://discuss.pytorch.org/t/how-the-pytorch-freeze-network-in-some-layers-only-the-rest-of-the-training/7088/2
