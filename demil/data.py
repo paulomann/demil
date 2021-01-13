@@ -51,7 +51,9 @@ class AVECCorpus(torch.utils.data.Dataset):
             for path in video_files:
                 name = "_".join(path.name.split("_")[:2])
                 labels.append(
-                    metadata.loc[metadata["Participant_ID"] == name]["PHQ_Binary"].values[0]
+                    metadata.loc[metadata["Participant_ID"] == name]["PHQ_Binary"].values[
+                        0
+                    ]
                 )
             labels = torch.tensor(labels).long()
             assert len(video_files) == len(audio_files) == len(labels)
@@ -119,6 +121,7 @@ class DepressionCorpus(torch.utils.data.Dataset):
     def __getitem__(self, i):
         CAPTION_IDX = 0
         IMG_PATH_IDX = 1
+        TIMESTAMP_IDX = 2
         user = self.dataset[i]
         posts = user.posts
         score = self.get_score(user.bdi)
@@ -182,22 +185,28 @@ def collate_fn(data: Tuple):
     batch_attn_mask_ids = []
     batch_visual_data = []
     batch_post_attn_mask = []
+    # Here, we want to createa a Sequence [p1, ..., pn] where the first element of
+    # the sequence starts in p1 and goes until pi, which is the last element of
+    # the sequence. From pi ... pn we padd the sequence until settings.MAX_SEQ_LENGTH
     for i, example in enumerate(data):
 
         textual_data, visual_data, label = example
         input_ids, attn_mask = textual_data["input_ids"], textual_data["attention_mask"]
         fill = settings.MAX_SEQ_LENGTH - input_ids.size(0)
-        posts_mask = torch.zeros(
+        posts_mask = torch.ones(
             settings.MAX_SEQ_LENGTH, dtype=torch.bool, device=attn_mask.device
         )
-        posts_mask[:fill] = True
+        posts_mask[:input_ids.size(0)] = False
         n_tokens = input_ids.size(1)
         input_ids_pad = []
         attn_mask_pad = []
 
         vis_padding = torch.zeros(size=[fill, *visual_data.size()[1:]])
-        batch_visual_data.append(torch.cat([vis_padding, visual_data], 0))
+        batch_visual_data.append(torch.cat([visual_data, vis_padding], 0))
         batch_post_attn_mask.append(posts_mask)
+
+        input_ids_pad.append(input_ids)
+        attn_mask_pad.append(attn_mask)
 
         for _ in range(0, fill):
             aux_input_ids, aux_attn_mask = get_input_ids_attn_mask(
@@ -209,17 +218,20 @@ def collate_fn(data: Tuple):
             input_ids_pad.append(aux_input_ids)
             attn_mask_pad.append(aux_attn_mask)
 
-        input_ids_pad.append(input_ids)
-        attn_mask_pad.append(attn_mask)
         batch_input_ids.append(torch.cat(input_ids_pad, 0))
         batch_attn_mask_ids.append(torch.cat(attn_mask_pad, 0))
 
         labels[i] = label
 
+    batch_input_ids = torch.stack(batch_input_ids)
+    batch_attn_mask_ids = torch.stack(batch_attn_mask_ids)
+    batch_visual_data = torch.stack(batch_visual_data)
+    batch_post_attn_mask = torch.stack(batch_post_attn_mask)
+
     return (
-        (torch.stack(batch_input_ids), torch.stack(batch_attn_mask_ids)),
-        torch.stack(batch_visual_data),
-        torch.stack(batch_post_attn_mask),
+        (batch_input_ids, batch_attn_mask_ids),
+        batch_visual_data,
+        batch_post_attn_mask,
         labels,
     )
 
