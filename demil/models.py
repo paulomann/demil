@@ -354,8 +354,10 @@ class MMIL(pl.LightningModule):
         self.text_proj = nn.Linear(768, d_model)
         self.vis_proj = nn.Linear(512, d_model)
         self.classifier = nn.Linear(d_model, 2)
-        self.vis_norm = nn.LayerNorm([settings.MAX_SEQ_LENGTH, 512])
-        self.txt_norm = nn.LayerNorm([settings.MAX_SEQ_LENGTH, 768])
+        # self.vis_norm = nn.LayerNorm([settings.MAX_SEQ_LENGTH, 512])
+        # self.txt_norm = nn.LayerNorm([settings.MAX_SEQ_LENGTH, 768])
+        self.vis_norm = nn.LayerNorm(d_model)
+        self.txt_norm = nn.LayerNorm(d_model)
         self.relu = nn.ReLU()
         self.init_layers()
         self.mask = None
@@ -379,13 +381,13 @@ class MMIL(pl.LightningModule):
             for input_ids, attn_mask in zip(src[0], src[1])
         ]
         textual_ftrs = torch.stack(textual_ftrs) * math.sqrt(self.d_model)
-        textual_ftrs = self.dropout(self.text_proj(textual_ftrs).transpose(0, 1))
+        textual_ftrs = self.txt_norm(self.dropout(self.text_proj(textual_ftrs).transpose(0, 1)))
 
         visual_ftrs = [self.visual_encoder(user_imgs_seq) for user_imgs_seq in tgt]
         visual_ftrs = torch.stack(visual_ftrs) * math.sqrt(
             self.d_model
         )  # [BATCH, SEQ, EMB]
-        visual_ftrs = self.dropout(self.vis_proj(visual_ftrs).transpose(0, 1))  # [SEQ, BATCH, EMB]
+        visual_ftrs = self.vis_norm(self.dropout(self.vis_proj(visual_ftrs).transpose(0, 1)))  # [SEQ, BATCH, EMB]
 
         if not self.ignore_pad: 
             key_padd_mask = None
@@ -436,7 +438,7 @@ class MMIL(pl.LightningModule):
         logits, _ = self(train_batch)
         if labels is not None:
             if self.weight:
-                w = torch.tensor([0.6279, 0.3721], dtype=logits.dtype, device=logits.device)
+                w = torch.tensor([1.47, 1], dtype=logits.dtype, device=logits.device)
                 loss_fct = nn.CrossEntropyLoss(weight=w)
             else:
                 loss_fct = nn.CrossEntropyLoss()
@@ -480,7 +482,7 @@ class MMIL(pl.LightningModule):
         logits, _ = self(val_batch)
         if labels is not None:
             if self.weight:
-                w = torch.tensor([0.6279, 0.3721], dtype=logits.dtype, device=logits.device)
+                w = torch.tensor([1.47, 1], dtype=logits.dtype, device=logits.device)
                 loss_fct = nn.CrossEntropyLoss(weight=w)
             else:
                 loss_fct = nn.CrossEntropyLoss()
@@ -528,7 +530,10 @@ class MMIL(pl.LightningModule):
 
         if labels is not None:
             if self.weight:
-                w = torch.tensor([0.6279, 0.3721], dtype=logits.dtype, device=logits.device)
+                # Remember that when using weight and reduction='none' in the CrossEntropyLoss
+                # we need to normalize the loss for each element, otherwise it will not reflect
+                # reality
+                w = torch.tensor([1.47, 1], dtype=logits.dtype, device=logits.device)
                 loss_fct = nn.CrossEntropyLoss(weight=w, reduction='none')
             else:
                 loss_fct = nn.CrossEntropyLoss(reduction='none')
@@ -614,6 +619,9 @@ class MMIL(pl.LightningModule):
         # textual
         for name, param in text_encoder.named_parameters():
             param.requires_grad = False
+        
+        for name, param in text_encoder.pooler.named_parameters():
+            param.requires_grad = True
 
         # Here we freeze all layers except the topmost layer.
         # for both textual and visual encoders
