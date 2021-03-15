@@ -20,6 +20,7 @@ LANGUAGE_MODEL = "neuralmind/bert-base-portuguese-cased"
 VISUAL_MODEL = "resnet34"
 WORKERS = 4
 MAX_SEQ_LENGTH = 60
+PATH_TO_BERT_CONFIG = Path(ROOT, "config", "config.json")
 
 BERTIMBAU = [
     "neuralmind/bert-base-portuguese-cased",

@@ -5,8 +5,10 @@ from typing import Literal, Tuple, Dict, List
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
+import json
 from transformers import PreTrainedTokenizer, AutoTokenizer
 from demil import settings
+from demil.transformer import UniterConfig
 
 
 @dataclass
@@ -86,3 +88,21 @@ def get_statistics_for_posts():
         print(
             f"""==== Report ({p}) ====\nAverage: {np.mean(qty)}\nStandard Deviation: {np.std(qty)}\n# Users: {len(all_users)}\nMax: {np.max(qty)}"""
         )
+
+
+# def parse_with_config(parser):
+#     args = parser.parse_args()
+#     if args.config is not None:
+#         config_args = json.load(open(args.config))
+#         override_keys = {arg[2:].split('=')[0] for arg in sys.argv[1:]
+#                          if arg.startswith('--')}
+#         for k, v in config_args.items():
+#             if k not in override_keys:
+#                 setattr(args, k, v)
+#     del args.config
+#     return args
+
+def get_bert_config(path: Path = settings.PATH_TO_BERT_CONFIG):
+    if path is not None:
+        config = UniterConfig(path)
+    return config

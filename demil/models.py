@@ -12,6 +12,8 @@ from typing import Dict, Literal
 import wandb
 from sklearn.metrics import precision_recall_fscore_support
 import random
+from demil.transformer import BertMIL
+from demil.utils import get_bert_config
 
 
 def avg_pool(data, input_lens: torch.BoolTensor = None):
@@ -70,6 +72,7 @@ class Attn(nn.Module):
 
         # Transpose max_length and batch_size dimensions
         attn_energies = attn_energies.t()
+        attn_energies[attn_energies == 0.0] = float("-Inf")
 
         # Return the softmax normalized probability scores (with added dimension)
         return F.softmax(attn_energies, dim=1).unsqueeze(1)
@@ -157,8 +160,9 @@ class DecoderLSTM(nn.Module):
             dropout=dropout,
         )
 
-    def forward(self, x, last_hidden, encoder_outputs = None):
-        return self.lstm(x, last_hidden), None
+    def forward(self, x, last_hidden, encoder_outputs=None):
+        outputs, hidden = self.lstm(x, last_hidden)
+        return (outputs, hidden, None)
 
 
 class AttnDecoderLSTM(nn.Module):
@@ -212,6 +216,43 @@ class AttnDecoderLSTM(nn.Module):
         # Return output and final hidden state
         return output, hidden, attn_weights
 
+
+class LSTM(nn.Module):
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        output_size: int,
+        n_layers: int = 1,
+        dropout: float = 0.1,
+        ignore_pad: bool = True,
+        batch_first: bool = False,
+    ):
+        super(LSTM, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.dropout = dropout
+        self.ignore_pad = ignore_pad
+        self.batch_first = batch_first
+        self.n_layers = n_layers
+        self.lstm = nn.LSTM(
+            self.hidden_size,
+            self.output_size,
+            self.n_layers,
+            batch_first=self.batch_first,
+            dropout=self.dropout,
+        )
+
+    def forward(self, src, tgt, input_lengths):
+        x = src * tgt
+        if self.ignore_pad:
+            x = torch.nn.utils.rnn.pack_padded_sequence(
+                x, input_lengths, enforce_sorted=False
+            )
+
+        outputs, (ho, co) = self.lstm(x)
+        return ho[-1], None
 
 
 class Seq2SeqLSTM(nn.Module):
@@ -278,23 +319,42 @@ class Seq2SeqLSTM(nn.Module):
     #     # return decoder_output[-1], torch.stack(attn_weights, dim=-1).transpose(1, 2)
 
     def forward(self, src, tgt, input_lengths):
-        max_seq_size = src.size(0)
-        encoder_outputs, decoder_hidden = self.encoder(src, input_lengths)
-        curr_input = tgt[0, :, :].unsqueeze(0)
+        # max_seq_size = src.size(0)
+        bsz = src.size(1)
+        encoder_outputs, (hidden, cell) = self.encoder(src, input_lengths)
+        curr_input = tgt[0, 0, :].unsqueeze(0)
         attn_weights = []
-        for i in range(1, max_seq_size):
-            decoder_output, decoder_hidden, attn_w = self.decoder(
-                curr_input, decoder_hidden, encoder_outputs
+        out = []
+        for j in range(0, bsz):
+
+            max_seq_size = input_lengths[j]
+            ho, co = hidden[:, j, :].unsqueeze(0), cell[:, j, :].unsqueeze(0)
+
+            for i in range(1, max_seq_size):
+                decoder_output, (ho, co), attn_w = self.decoder(
+                    curr_input.unsqueeze(0),
+                    (ho, co),
+                    encoder_outputs[:, j, :].unsqueeze(1),
+                )
+                # attn_weights.append(attn_w.detach().squeeze())
+                teacher_force = random.random() < self.teacher_force
+                curr_input = (
+                    tgt[i, j, :].unsqueeze(0)
+                    if teacher_force
+                    else decoder_output.squeeze(0)
+                )
+                # curr_input = tgt[i, :, :].unsqueeze(0)
+
+            decoder_output, (ho, co), attn_w = self.decoder(
+                curr_input.unsqueeze(0), (ho, co), encoder_outputs[:, j, :].unsqueeze(1)
             )
-            # attn_weights.append(attn_w.detach().squeeze())
-            teacher_force = random.random() < self.teacher_force
-            curr_input = tgt[i, :, :].unsqueeze(0) if teacher_force else decoder_output
-            # curr_input = tgt[i, :, :].unsqueeze(0)
+
+            out.append(decoder_output.squeeze(0))
 
         # attn_weights.append(attn_w.detach().squeeze())
 
-        return decoder_hidden[0][-1].squeeze(), None
-        # return decoder_output[-1], torch.stack(attn_weights, dim=-1).transpose(1, 2)
+        return torch.cat(out), None
+
 
 class MMIL(pl.LightningModule):
     def __init__(
@@ -320,6 +380,21 @@ class MMIL(pl.LightningModule):
         self.ignore_pad = ignore_pad
         self.d_model = d_model
         self.weight = weight
+        self.rnn_type = rnn_type
+        self.text_encoder = AutoModel.from_pretrained(language_model)
+        self.visual_encoder = getattr(models, vis_model)(pretrained=True)
+        self.visual_encoder.fc = nn.Identity()
+        self.dropout = nn.Dropout(0.2)
+        self.pos_encoder = PositionalEncoding(d_model)
+        self.text_proj = nn.Linear(768, d_model)
+        self.vis_proj = nn.Linear(512, d_model)
+        self.classifier = nn.Linear(d_model, 2)
+        self.vis_norm = nn.LayerNorm(512)
+        self.txt_norm = nn.LayerNorm(768)
+        self.relu = nn.ReLU()
+        self.mask = None
+        self.use_mask = use_mask
+
         if rnn_type == "transformer":
 
             self.rnn = nn.Transformer(
@@ -328,7 +403,7 @@ class MMIL(pl.LightningModule):
                 num_encoder_layers=num_encoder_layers,
                 num_decoder_layers=num_decoder_layers,
             )
-        elif rnn_type == "lstm":
+        elif rnn_type == "seq2seq":
 
             self.rnn = Seq2SeqLSTM(
                 d_model,
@@ -341,31 +416,30 @@ class MMIL(pl.LightningModule):
                 teacher_force=teacher_force,
             )
 
+        elif rnn_type == "lstm":
+
+            self.rnn = LSTM(
+                d_model, d_model, d_model, n_layers=1, ignore_pad=self.ignore_pad
+            )
+
+        elif rnn_type == "bert":
+
+            bert_config = get_bert_config()
+            bert_config.hidden_size = d_model
+            bert_config.num_attention_heads = nhead
+            bert_config.num_hidden_layers = num_encoder_layers
+            self.rnn = BertMIL(bert_config)
+
         else:
 
             raise NotImplementedError(f"The rnn type {self.rnn_type} is not implemented")
 
-        self.rnn_type = rnn_type
-        self.text_encoder = AutoModel.from_pretrained(language_model)
-        self.visual_encoder = getattr(models, vis_model)(pretrained=True)
-        self.visual_encoder.fc = nn.Identity()
-        self.dropout = nn.Dropout(0.2)
-        self.pos_encoder = PositionalEncoding(d_model)
-        self.text_proj = nn.Linear(768, d_model)
-        self.vis_proj = nn.Linear(512, d_model)
-        self.classifier = nn.Linear(d_model, 2)
-        # self.vis_norm = nn.LayerNorm([settings.MAX_SEQ_LENGTH, 512])
-        # self.txt_norm = nn.LayerNorm([settings.MAX_SEQ_LENGTH, 768])
-        self.vis_norm = nn.LayerNorm(d_model)
-        self.txt_norm = nn.LayerNorm(d_model)
-        self.relu = nn.ReLU()
         self.init_layers()
-        self.mask = None
-        self.use_mask = use_mask
         self.freeze_layers(
             self.text_encoder,
             self.visual_encoder,
         )
+        self.save_hyperparameters()
 
     def generate_square_subsequent_mask(self, sz, device):
         mask = (torch.triu(torch.ones(sz, sz, device=device)) == 1).transpose(0, 1)
@@ -381,15 +455,19 @@ class MMIL(pl.LightningModule):
             for input_ids, attn_mask in zip(src[0], src[1])
         ]
         textual_ftrs = torch.stack(textual_ftrs) * math.sqrt(self.d_model)
-        textual_ftrs = self.txt_norm(self.dropout(self.text_proj(textual_ftrs).transpose(0, 1)))
+        textual_ftrs = self.dropout(
+            self.text_proj(self.txt_norm(textual_ftrs).transpose(0, 1))
+        )
 
         visual_ftrs = [self.visual_encoder(user_imgs_seq) for user_imgs_seq in tgt]
         visual_ftrs = torch.stack(visual_ftrs) * math.sqrt(
             self.d_model
         )  # [BATCH, SEQ, EMB]
-        visual_ftrs = self.vis_norm(self.dropout(self.vis_proj(visual_ftrs).transpose(0, 1)))  # [SEQ, BATCH, EMB]
+        visual_ftrs = self.dropout(
+            self.vis_proj(self.vis_norm(visual_ftrs).transpose(0, 1))
+        )  # [SEQ, BATCH, EMB]
 
-        if not self.ignore_pad: 
+        if not self.ignore_pad:
             key_padd_mask = None
 
         if self.mask is None and self.use_mask:
@@ -421,6 +499,12 @@ class MMIL(pl.LightningModule):
             )
             pooled_out, attn_weights = self.rnn(textual_ftrs, visual_ftrs, input_lengths)
 
+        elif self.rnn_type == "bert":
+
+            x = self.pos_encoder(textual_ftrs * visual_ftrs).transpose(0, 1)
+            mask = (1 - key_padd_mask.type(x.dtype))
+            pooled_out, attn_weights = self.rnn(x, attention_mask=mask)
+
         else:
             raise NotImplementedError(f"The rnn type {self.rnn_type} is not implemented")
 
@@ -429,9 +513,11 @@ class MMIL(pl.LightningModule):
         return logits, attn_weights
 
     def configure_optimizers(self):
+        print(f"Optimizer args: {self.optimizer_args}")
         optimizer = AdamW(self.parameters(), **self.optimizer_args)
-        scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
-        return [optimizer], [scheduler]
+        # scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
+        # return [optimizer], [scheduler]
+        return optimizer
 
     def training_step(self, train_batch, batch_idx):
         *_, labels = train_batch
@@ -481,11 +567,7 @@ class MMIL(pl.LightningModule):
         *_, labels = val_batch
         logits, _ = self(val_batch)
         if labels is not None:
-            if self.weight:
-                w = torch.tensor([1.47, 1], dtype=logits.dtype, device=logits.device)
-                loss_fct = nn.CrossEntropyLoss(weight=w)
-            else:
-                loss_fct = nn.CrossEntropyLoss()
+            loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(logits.view(-1, 2), labels.view(-1))
 
         # self.logger.experiment.log({"val_loss": loss})
@@ -529,14 +611,7 @@ class MMIL(pl.LightningModule):
         probas = F.softmax(logits, dim=-1)
 
         if labels is not None:
-            if self.weight:
-                # Remember that when using weight and reduction='none' in the CrossEntropyLoss
-                # we need to normalize the loss for each element, otherwise it will not reflect
-                # reality
-                w = torch.tensor([1.47, 1], dtype=logits.dtype, device=logits.device)
-                loss_fct = nn.CrossEntropyLoss(weight=w, reduction='none')
-            else:
-                loss_fct = nn.CrossEntropyLoss(reduction='none')
+            loss_fct = nn.CrossEntropyLoss(reduction="none")
             loss = loss_fct(logits.view(-1, 2), labels.view(-1)).cpu()
 
         attn_weights = attn_weights.cpu().squeeze() if attn_weights is not None else None
@@ -556,17 +631,7 @@ class MMIL(pl.LightningModule):
             labels.extend(i[0])
             probas.extend(i[1])
             preds.extend(i[2])
-        #     vals , source_seq_idx = i[3].topk(k=3, dim=2)
-        #     target_seq_idx = vals.sum(dim=2).argmax(dim=1)
-        #     target_indices.append(target_seq_idx)
-        #     source_indices.append(source_seq_idx)
-        #     losses.append(i[4])
-        
-        # source_indices = torch.cat(source_indices, dim=0)
-        # target_indices = torch.cat(target_indices, dim=0)
-        # losses = torch.cat(losses)
-        # _, largest_losses = losses.topk(k=2)
-        # _, lowest_losses = losses.topk(k=2, largest=False)
+            losses.append(i[4])
 
         self.logger.experiment.log(
             {
@@ -588,7 +653,9 @@ class MMIL(pl.LightningModule):
         self.log_dict({"precision": precision, "recall": recall, "fscore": fscore})
 
     def init_layers(self):
-        init_weights(self.text_proj, self.vis_proj, self.classifier, self.vis_norm, self.txt_norm)
+        init_weights(
+            self.text_proj, self.vis_proj, self.classifier, self.vis_norm, self.txt_norm
+        )
         # nn.init.constant_(self.classifier.weight.data, 0.42)
 
         # nn.init.uniform_(self.text_proj.weight.data, -0.1, 0.1)
@@ -597,21 +664,17 @@ class MMIL(pl.LightningModule):
         # nn.init.normal_(self.text_proj.weight.data, 0, 0.02)
         # nn.init.zeros_(self.text_proj.bias.data)
 
-        if self.rnn_type == "lstm":
-            for name, param in self.rnn.named_parameters():
-                if "weight" in name or "bias" in name:
-                    param.data.uniform_(-0.1, 0.1)
-
-        elif self.rnn_type == "transformer":
+        if self.rnn_type == "transformer":
             for name, param in self.rnn.named_parameters():
                 if "weight" in name:
                     if param.dim() > 1:
                         nn.init.xavier_uniform_(param.data)
                 elif "bias" in name:
                     nn.init.constant_(param.data, 0.0)
+        else:
+            init_weights(self.rnn)
 
     def freeze_layers(self, text_encoder: AutoModel, vis_encoder: ResNet):
-        # visual, from https://discuss.pytorch.org/t/how-the-pytorch-freeze-network-in-some-layers-only-the-rest-of-the-training/7088/2
         for child in vis_encoder.children():
             for param in child.parameters():
                 param.requires_grad = False
@@ -619,7 +682,7 @@ class MMIL(pl.LightningModule):
         # textual
         for name, param in text_encoder.named_parameters():
             param.requires_grad = False
-        
+
         for name, param in text_encoder.pooler.named_parameters():
             param.requires_grad = True
 

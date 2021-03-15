@@ -111,7 +111,7 @@ from transformers import AutoTokenizer
 @click.option(
     "--overfit",
     help=f"Overfit the dataset in a predetermined number of batches",
-    type=click.INT,
+    type=click.FLOAT,
     default=0
 )
 @click.option(
@@ -164,7 +164,7 @@ def train(
     rnn_type: str,
     shuffle: bool,
     seed: int,
-    overfit: bool,
+    overfit: float,
     attention: bool,
     seq_len: int,
     weight: bool,
