@@ -25,7 +25,8 @@ import torch
 from torch import nn
 # from apex.normalization.fused_layer_norm import FusedLayerNorm as BertLayerNorm
 from torch.nn import LayerNorm as BertLayerNorm
-
+import torch.nn.functional as F
+from einops import rearrange, repeat
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +43,13 @@ def gelu(x):
 def swish(x):
     return x * torch.sigmoid(x)
 
-
-ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu, "swish": swish}
-
-
 class GELU(nn.Module):
     def forward(self, input_):
         output = gelu(input_)
         return output
 
+
+ACT2FN = {"gelu": GELU(), "relu": torch.nn.functional.relu, "swish": swish}
 
 class BertSelfAttention(nn.Module):
     def __init__(self, config):
@@ -68,13 +67,17 @@ class BertSelfAttention(nn.Module):
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+        self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
+        if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
+            self.max_position_embeddings = config.max_position_embeddings
+            self.distance_embedding = nn.Embedding(2 * config.max_position_embeddings - 1, self.attention_head_size)
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(*new_x_shape)
         return x.permute(0, 2, 1, 3)
 
-    def forward(self, hidden_states, attention_mask):
+    def forward(self, hidden_states, attention_mask, timestamps=None):
         mixed_query_layer = self.query(hidden_states)
         mixed_key_layer = self.key(hidden_states)
         mixed_value_layer = self.value(hidden_states)
@@ -85,6 +88,39 @@ class BertSelfAttention(nn.Module):
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+
+        if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
+            seq_length = hidden_states.size()[1]
+            bsz = hidden_states.size()[0]
+            if timestamps is not None:
+                cls_id = torch.tensor(
+                    [[313]],
+                    dtype=timestamps.dtype,
+                    device=timestamps.device
+                )
+                cls_id = repeat(cls_id, "b s -> (repeat b) s", repeat=bsz)
+                timestamps = torch.cat([cls_id, timestamps], dim=1)
+                position_l = rearrange(timestamps, "b t -> b t ()")
+                position_r = rearrange(timestamps, "b t -> b () t")
+            else:
+                position_l = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
+                position_r = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
+            distance = position_l - position_r
+            positional_embedding = self.distance_embedding(distance + self.max_position_embeddings - 1)
+            positional_embedding = positional_embedding.to(dtype=query_layer.dtype)  # fp16 compatibility
+
+            if self.position_embedding_type == "relative_key":
+                relative_position_scores = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
+                attention_scores = attention_scores + relative_position_scores
+            elif self.position_embedding_type == "relative_key_query":
+                if timestamps is not None:
+                    relative_position_scores_query = torch.einsum("bhld,blrd->bhlr", query_layer, positional_embedding)
+                    relative_position_scores_key = torch.einsum("bhrd,blrd->bhlr", key_layer, positional_embedding)
+                else:
+                    relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
+                    relative_position_scores_key = torch.einsum("bhrd,lrd->bhlr", key_layer, positional_embedding)
+                attention_scores = attention_scores + relative_position_scores_query + relative_position_scores_key
+
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
         attention_scores = attention_scores + attention_mask
@@ -125,8 +161,8 @@ class BertAttention(nn.Module):
         self.self = BertSelfAttention(config)
         self.output = BertSelfOutput(config)
 
-    def forward(self, input_tensor, attention_mask):
-        self_output = self.self(input_tensor, attention_mask)
+    def forward(self, input_tensor, attention_mask, timestamps=None):
+        self_output = self.self(input_tensor, attention_mask, timestamps=timestamps)
         attention_output = self.output(self_output[0], input_tensor)
         # return attention_output
         outputs = (attention_output, ) + self_output[1:]
@@ -169,8 +205,8 @@ class BertLayer(nn.Module):
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
 
-    def forward(self, hidden_states, attention_mask):
-        attention_outputs = self.attention(hidden_states, attention_mask)
+    def forward(self, hidden_states, attention_mask, timestamps=None):
+        attention_outputs = self.attention(hidden_states, attention_mask, timestamps=timestamps)
         attention_output = attention_outputs[0]
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
@@ -181,15 +217,22 @@ class BertLayer(nn.Module):
 class BertPooler(nn.Module):
     def __init__(self, config):
         super(BertPooler, self).__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.activation = nn.Tanh()
+        self.layer = nn.Sequential(
+            nn.Linear(config.hidden_size, config.hidden_size),
+            ACT2FN[config.hidden_act],
+            nn.Dropout(config.hidden_dropout_prob),
+            nn.Linear(config.hidden_size, config.hidden_size)
+        )
+        # self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        # self.activation = nn.Tanh()
 
     def forward(self, hidden_states):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
         first_token_tensor = hidden_states[:, 0]
-        pooled_output = self.dense(first_token_tensor)
-        pooled_output = self.activation(pooled_output)
+        pooled_output = self.layer(first_token_tensor)
+        # pooled_output = self.dense(first_token_tensor)
+        # pooled_output = self.activation(pooled_output)
         return pooled_output
 
 

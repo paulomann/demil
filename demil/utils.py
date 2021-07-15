@@ -9,6 +9,7 @@ import json
 from transformers import PreTrainedTokenizer, AutoTokenizer
 from demil import settings
 from demil.transformer import UniterConfig
+import torch
 
 
 @dataclass
@@ -16,6 +17,42 @@ class User:
     username: str
     bdi: int
     posts: List[Tuple[str, Path, datetime]]
+
+
+@dataclass
+class TwitterUser:
+    username: str
+    label: int
+    posts: List[str]
+
+
+def load_depressbr_dataframe(dataset: Literal["train", "val", "test"]) -> pd.DataFrame:
+    if dataset not in ["train", "val", "test"]:
+        raise ValueError(f"The {dataset=} parameter does not exist.")
+    return pd.read_csv(settings.PATH_TO_DEPRESSBR / f"{dataset}.csv", sep=",")
+
+
+def get_depressbr_info(df: pd.DataFrame) -> List[TwitterUser]:
+    users = {}
+    users_list = []
+    for row in df.itertuples():
+        username = row.User_ID
+        text = row.Text
+        label = 0 if row.Class == "no" else 1
+        if username in users:
+            users[username]["posts"].append(text)
+        else:
+            users[username] = {"label": label, "posts": []}
+    for k, v in users.items():
+        if len(v["posts"]) > 0:
+            user = TwitterUser(k, v["label"], v["posts"])
+            users_list.append(user)
+    return users_list
+
+
+def get_depressbr_dataset(dataset: Literal["train", "val", "test"]) -> List[TwitterUser]:
+    df = load_depressbr_dataframe(dataset)
+    return get_depressbr_info(df)
 
 
 def load_dataframes(
@@ -101,6 +138,7 @@ def get_statistics_for_posts():
 #                 setattr(args, k, v)
 #     del args.config
 #     return args
+
 
 def get_bert_config(path: Path = settings.PATH_TO_BERT_CONFIG):
     if path is not None:

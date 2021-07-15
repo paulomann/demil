@@ -14,6 +14,7 @@ from sklearn.metrics import precision_recall_fscore_support
 import random
 from demil.transformer import BertMIL
 from demil.utils import get_bert_config
+from einops import reduce, rearrange
 
 
 def avg_pool(data, input_lens: torch.BoolTensor = None):
@@ -33,6 +34,22 @@ def init_weights(*models):
         for name, param in model.named_parameters():
             if "weight" in name or "bias" in name:
                 param.data.uniform_(-0.1, 0.1)
+
+
+class MeanMIL(nn.Module):
+    def __init__(self, d_model):
+        super(MeanMIL, self).__init__()
+        self.d_model = d_model
+        self.linear = nn.Sequential(
+            nn.Linear(self.d_model, d_model // 2),
+            nn.ReLU(),
+            nn.Linear(self.d_model // 2, self.d_model),
+        )
+
+    def forward(self, x):
+        x = reduce(x, "b t e -> b e", "mean")
+        logits = self.linear(x)
+        return logits
 
 
 class Attn(nn.Module):
@@ -76,29 +93,6 @@ class Attn(nn.Module):
 
         # Return the softmax normalized probability scores (with added dimension)
         return F.softmax(attn_energies, dim=1).unsqueeze(1)
-
-
-class PositionalEncoding(nn.Module):
-    def __init__(
-        self, d_model: int, dropout: float = 0.1, max_len: int = settings.MAX_SEQ_LENGTH
-    ):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-        self.register_buffer("pe", pe)
-
-    def forward(self, x):
-        # print(x.size(), self.pe.size())
-        x = x + self.pe[: x.size(0), :]
-        return self.dropout(x)
 
 
 class EncoderLSTM(nn.Module):
@@ -220,7 +214,6 @@ class AttnDecoderLSTM(nn.Module):
 class LSTM(nn.Module):
     def __init__(
         self,
-        input_size: int,
         hidden_size: int,
         output_size: int,
         n_layers: int = 1,
@@ -229,7 +222,6 @@ class LSTM(nn.Module):
         batch_first: bool = False,
     ):
         super(LSTM, self).__init__()
-        self.input_size = input_size
         self.hidden_size = hidden_size
         self.output_size = output_size
         self.dropout = dropout
@@ -244,8 +236,8 @@ class LSTM(nn.Module):
             dropout=self.dropout,
         )
 
-    def forward(self, src, tgt, input_lengths):
-        x = src * tgt
+    def forward(self, x, input_lengths):
+
         if self.ignore_pad:
             x = torch.nn.utils.rnn.pack_padded_sequence(
                 x, input_lengths, enforce_sorted=False
@@ -296,27 +288,6 @@ class Seq2SeqLSTM(nn.Module):
             self.dropout,
             self.batch_first,
         )
-
-    # def forward(self, src, tgt, input_lengths):
-    #     max_seq_size = src.size(0)
-    #     # decoder_hidden = (ho, co)
-    #     encoder_outputs, decoder_hidden = self.encoder(src, input_lengths)
-    #     # co = torch.zeros(ho.shape, device=src.device, dtype=src.dtype)
-    #     curr_input = tgt[0, :, :].unsqueeze(0)
-    #     attn_weights = []
-    #     for i in range(1, max_seq_size):
-    #         decoder_output, decoder_hidden, attn_w = self.decoder(
-    #             curr_input, decoder_hidden, encoder_outputs
-    #         )
-    #         # attn_weights.append(attn_w.detach().squeeze())
-    #         teacher_force = random.random() < self.teacher_force
-    #         curr_input = tgt[i, :, :].unsqueeze(0) if teacher_force else decoder_output
-    #         # curr_input = tgt[i, :, :].unsqueeze(0)
-
-    #     # attn_weights.append(attn_w.detach().squeeze())
-
-    #     return decoder_hidden[0][-1].squeeze(), None
-    #     # return decoder_output[-1], torch.stack(attn_weights, dim=-1).transpose(1, 2)
 
     def forward(self, src, tgt, input_lengths):
         # max_seq_size = src.size(0)
@@ -373,6 +344,10 @@ class MMIL(pl.LightningModule):
         attention: bool = False,
         weight: bool = False,
         teacher_force: float = 0.0,
+        text: bool = True,
+        visual: bool = True,
+        pos_embedding: str = "absolute",
+        timestamp: bool = False,
     ):
         super().__init__()
         self.scheduler_args = scheduler_args
@@ -385,17 +360,24 @@ class MMIL(pl.LightningModule):
         self.visual_encoder = getattr(models, vis_model)(pretrained=True)
         self.visual_encoder.fc = nn.Identity()
         self.dropout = nn.Dropout(0.2)
-        self.pos_encoder = PositionalEncoding(d_model)
-        self.text_proj = nn.Linear(768, d_model)
+        self.text_proj = nn.Linear(self.text_encoder.pooler.dense.out_features, d_model)
         self.vis_proj = nn.Linear(512, d_model)
         self.classifier = nn.Linear(d_model, 2)
         self.vis_norm = nn.LayerNorm(512)
-        self.txt_norm = nn.LayerNorm(768)
+        self.txt_norm = nn.LayerNorm(self.text_encoder.pooler.dense.out_features)
         self.relu = nn.ReLU()
         self.mask = None
         self.use_mask = use_mask
+        self.text = text
+        self.visual = visual
+        self.use_timestamp = timestamp
 
         if rnn_type == "transformer":
+
+            if not (text and visual):
+                raise ValueError(
+                    "With seq2seq models we need to set --text and --visual modalities together."
+                )
 
             self.rnn = nn.Transformer(
                 d_model=d_model,
@@ -404,6 +386,10 @@ class MMIL(pl.LightningModule):
                 num_decoder_layers=num_decoder_layers,
             )
         elif rnn_type == "seq2seq":
+            if not (text and visual):
+                raise ValueError(
+                    "With seq2seq models we need to set --text and --visual modalities together."
+                )
 
             self.rnn = Seq2SeqLSTM(
                 d_model,
@@ -415,21 +401,17 @@ class MMIL(pl.LightningModule):
                 use_attention=attention,
                 teacher_force=teacher_force,
             )
-
         elif rnn_type == "lstm":
-
-            self.rnn = LSTM(
-                d_model, d_model, d_model, n_layers=1, ignore_pad=self.ignore_pad
-            )
-
+            self.rnn = LSTM(d_model, d_model, n_layers=1, ignore_pad=self.ignore_pad)
         elif rnn_type == "bert":
-
             bert_config = get_bert_config()
             bert_config.hidden_size = d_model
             bert_config.num_attention_heads = nhead
             bert_config.num_hidden_layers = num_encoder_layers
+            bert_config.position_embedding_type = pos_embedding
             self.rnn = BertMIL(bert_config)
-
+        elif rnn_type == "mean":
+            self.rnn = MeanMIL(d_model)
         else:
 
             raise NotImplementedError(f"The rnn type {self.rnn_type} is not implemented")
@@ -449,23 +431,30 @@ class MMIL(pl.LightningModule):
         return mask
 
     def forward(self, batch):
-        src, tgt, key_padd_mask, labels = batch
-        textual_ftrs = [
-            self.text_encoder(input_ids, attn_mask)[-1]
-            for input_ids, attn_mask in zip(src[0], src[1])
-        ]
-        textual_ftrs = torch.stack(textual_ftrs) * math.sqrt(self.d_model)
-        textual_ftrs = self.dropout(
-            self.text_proj(self.txt_norm(textual_ftrs).transpose(0, 1))
-        )
+        src, tgt, key_padd_mask, timestamps, labels = batch
 
-        visual_ftrs = [self.visual_encoder(user_imgs_seq) for user_imgs_seq in tgt]
-        visual_ftrs = torch.stack(visual_ftrs) * math.sqrt(
-            self.d_model
-        )  # [BATCH, SEQ, EMB]
-        visual_ftrs = self.dropout(
-            self.vis_proj(self.vis_norm(visual_ftrs).transpose(0, 1))
-        )  # [SEQ, BATCH, EMB]
+        textual_ftrs = 1
+        visual_ftrs = 1
+        if self.text:
+
+            textual_ftrs = [
+                self.text_encoder(input_ids, attn_mask)[-1]
+                for input_ids, attn_mask in zip(src[0], src[1])
+            ]
+            textual_ftrs = torch.stack(textual_ftrs) * math.sqrt(self.d_model)
+            textual_ftrs = self.dropout(
+                self.text_proj(self.txt_norm(textual_ftrs).transpose(0, 1))
+            )
+
+        if self.visual:
+
+            visual_ftrs = [self.visual_encoder(user_imgs_seq) for user_imgs_seq in tgt]
+            visual_ftrs = torch.stack(visual_ftrs) * math.sqrt(
+                self.d_model
+            )  # [BATCH, SEQ, EMB]
+            visual_ftrs = self.dropout(
+                self.vis_proj(self.vis_norm(visual_ftrs).transpose(0, 1))
+            )  # [SEQ, BATCH, EMB]
 
         if not self.ignore_pad:
             key_padd_mask = None
@@ -497,14 +486,24 @@ class MMIL(pl.LightningModule):
                 if self.ignore_pad
                 else None
             )
-            pooled_out, attn_weights = self.rnn(textual_ftrs, visual_ftrs, input_lengths)
+
+            x = textual_ftrs * visual_ftrs
+            pooled_out, attn_weights = self.rnn(x, input_lengths)
 
         elif self.rnn_type == "bert":
 
-            x = self.pos_encoder(textual_ftrs * visual_ftrs).transpose(0, 1)
-            mask = (1 - key_padd_mask.type(x.dtype))
-            pooled_out, attn_weights = self.rnn(x, attention_mask=mask)
-
+            x = (textual_ftrs * visual_ftrs).transpose(0, 1)
+            mask = 1 - key_padd_mask.type(x.dtype)
+            if self.use_timestamp:
+                pooled_out, attn_weights = self.rnn(
+                    x, attention_mask=mask, timestamps=timestamps
+                )
+            else:
+                pooled_out, attn_weights = self.rnn(x, attention_mask=mask)
+        elif self.rnn_type == "mean":
+            x = (textual_ftrs * visual_ftrs).transpose(0, 1)
+            attn_weights = None
+            pooled_out = self.rnn(x)
         else:
             raise NotImplementedError(f"The rnn type {self.rnn_type} is not implemented")
 
@@ -515,9 +514,8 @@ class MMIL(pl.LightningModule):
     def configure_optimizers(self):
         print(f"Optimizer args: {self.optimizer_args}")
         optimizer = AdamW(self.parameters(), **self.optimizer_args)
-        # scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
-        # return [optimizer], [scheduler]
-        return optimizer
+        scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
+        return [optimizer], [scheduler]
 
     def training_step(self, train_batch, batch_idx):
         *_, labels = train_batch
@@ -539,9 +537,6 @@ class MMIL(pl.LightningModule):
             print(f"===>TRAIN ACCUR: {acc}")
             print()
 
-        # self.logger.experiment.log({"train_loss": loss})
-        # self.log("train_loss", loss)
-        # self.log_dict({"train_loss": loss, "train_acc": acc})
         preds = preds.unsqueeze(0) if preds.dim() == 0 else preds
         return {"loss": loss, "preds": preds, "targets": labels}
 
@@ -570,8 +565,6 @@ class MMIL(pl.LightningModule):
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(logits.view(-1, 2), labels.view(-1))
 
-        # self.logger.experiment.log({"val_loss": loss})
-        # self.log("val_loss", loss)
         preds = F.softmax(logits, dim=-1).argmax(dim=-1)
         acc = ((preds == labels).sum().float()) / len(labels)
         print()
@@ -580,9 +573,6 @@ class MMIL(pl.LightningModule):
         print(f"===>VAL ACCUR: {acc}")
         print()
 
-        # self.logger.experiment.log({"train_loss": loss})
-        # self.log("train_loss", loss)
-        # self.log_dict({"val_loss": loss, "val_acc": acc})
         preds = preds.unsqueeze(0) if preds.dim() == 0 else preds
         return {"val_loss": loss, "preds": preds, "targets": labels}
 
@@ -614,24 +604,26 @@ class MMIL(pl.LightningModule):
             loss_fct = nn.CrossEntropyLoss(reduction="none")
             loss = loss_fct(logits.view(-1, 2), labels.view(-1)).cpu()
 
-        attn_weights = attn_weights.cpu().squeeze() if attn_weights is not None else None
+        # attn_weights = attn_weights.cpu().squeeze() if attn_weights is not None else None
         labels = labels.cpu().tolist()
         probas = probas.cpu().tolist()
         preds = preds.cpu().tolist()
-        return (labels, probas, preds, attn_weights, loss)
+        # return (labels, probas, preds, attn_weights, loss, inpt)
+        return (labels, probas, preds)
 
     def test_epoch_end(self, outputs):
         labels = []
         probas = []
         preds = []
-        losses = []
-        source_indices = []
-        target_indices = []
         for i in outputs:
             labels.extend(i[0])
             probas.extend(i[1])
             preds.extend(i[2])
-            losses.append(i[4])
+
+        print()
+        print(f"===>TEST PREDS: {preds}")
+        print(f"===>TEST LABEL: {labels}")
+        print()
 
         self.logger.experiment.log(
             {
@@ -656,13 +648,6 @@ class MMIL(pl.LightningModule):
         init_weights(
             self.text_proj, self.vis_proj, self.classifier, self.vis_norm, self.txt_norm
         )
-        # nn.init.constant_(self.classifier.weight.data, 0.42)
-
-        # nn.init.uniform_(self.text_proj.weight.data, -0.1, 0.1)
-        # nn.init.uniform_(self.text_proj.bias.data, -0.1, 0.1)
-
-        # nn.init.normal_(self.text_proj.weight.data, 0, 0.02)
-        # nn.init.zeros_(self.text_proj.bias.data)
 
         if self.rnn_type == "transformer":
             for name, param in self.rnn.named_parameters():
@@ -671,8 +656,15 @@ class MMIL(pl.LightningModule):
                         nn.init.xavier_uniform_(param.data)
                 elif "bias" in name:
                     nn.init.constant_(param.data, 0.0)
-        else:
+        elif self.rnn_type == "lstm":
             init_weights(self.rnn)
+# for name, param in lstm.named_parameters():
+#   if 'bias' in name:
+#      nn.init.constant(param, 0.0)
+#   elif 'weight' in name:
+#      nn.init.xavier_normal(param)
+        else:
+            pass
 
     def freeze_layers(self, text_encoder: AutoModel, vis_encoder: ResNet):
         for child in vis_encoder.children():

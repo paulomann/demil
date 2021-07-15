@@ -138,6 +138,48 @@ from transformers import AutoTokenizer
     default=0.0,
     type=click.FLOAT,
 )
+@click.option(
+    "--augment-data/--no-augment-data",
+    is_flag=True,
+    help=f"Whether to augment data or not.",
+    default=False,
+)
+@click.option(
+    "--text/--no-text",
+    is_flag=True,
+    help=f"Whether to use the text modality or not.",
+    default=True,
+)
+@click.option(
+    "--visual/--no-visual",
+    is_flag=True,
+    help=f"Whether to use the visual modality or not.",
+    default=True,
+)
+@click.option(
+    "--pos-embedding",
+    help=f"Whether to use 'absolute' positional encoding, or 'relative_key', or 'relative_key_query'.",
+    default="absolute",
+    type=click.STRING,
+)
+@click.option(
+    "--timestamp/--no-timestamp",
+    is_flag=True,
+    help=f"Whether to use the timestamp as a relative Positional Encoding technique or not.",
+    default=False,
+)
+@click.option(
+    "--dataset",
+    help=f"Which dataset to use (DeprUFF/DepressBR).",
+    default="DeprUFF",
+    type=click.STRING,
+)
+@click.option(
+    "--shuffle-posts/--no-shuffle-posts",
+    is_flag=True,
+    help=f"Whether to randomize the order of posts or not.",
+    default=False,
+)
 def train(
     gpu: int,
     name: str,
@@ -169,6 +211,13 @@ def train(
     seq_len: int,
     weight: bool,
     teacher_force: float,
+    augment_data: bool,
+    text: bool,
+    visual: bool,
+    pos_embedding: str,
+    timestamp: bool,
+    dataset: str,
+    shuffle_posts: bool
 ):
     seed_everything(seed)
     parameters = locals()
@@ -190,6 +239,9 @@ def train(
         collate_fn=collate_fn,
         shuffle=shuffle,
         tokenizer=tokenizer,
+        augment_data=augment_data,
+        dataset=dataset,
+        shuffle_posts=shuffle_posts
     )
     gradient_accumulation_steps = 1
     t_total = (len(train) // gradient_accumulation_steps) * epochs
@@ -226,7 +278,11 @@ def train(
         rnn_type=rnn_type,
         attention=attention,
         weight=weight,
-        teacher_force=teacher_force
+        teacher_force=teacher_force,
+        text=text,
+        visual=visual,
+        pos_embedding=pos_embedding,
+        timestamp=timestamp
     )
     trainer = pl.Trainer(
         deterministic=True,

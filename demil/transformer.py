@@ -13,30 +13,74 @@ from pathlib import Path
 
 import torch
 from torch import nn
+
 # from apex.normalization.fused_layer_norm import FusedLayerNorm
 from torch.nn import LayerNorm as FusedLayerNorm
 
 from demil.layer import BertLayer, BertPooler
+from demil import settings
+from einops import rearrange, repeat
 
 
 logger = logging.getLogger(__name__)
 
 
+class AbsPositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int, dropout: float = 0.1):
+        super(AbsPositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        self.position_embeddings = nn.Embedding(max_len, d_model)
+        position = torch.arange(max_len).expand((1, -1))
+        self.register_buffer("position_ids", position)
+
+    def forward(self, x):
+        position_ids = self.position_ids[:, 0 : x.size(1)]
+        position_embeddings = self.position_embeddings(position_ids)
+        x += position_embeddings
+        return x
+
+
+# class PositionalEncoding(nn.Module):
+#     def __init__(
+#         self, d_model: int, dropout: float = 0.1, max_len: int = settings.MAX_SEQ_LENGTH
+#     ):
+#         super(PositionalEncoding, self).__init__()
+#         self.dropout = nn.Dropout(p=dropout)
+
+#         pe = torch.zeros(max_len, d_model)
+#         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+#         div_term = torch.exp(
+#             torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+#         )
+#         pe[:, 0::2] = torch.sin(position * div_term)
+#         pe[:, 1::2] = torch.cos(position * div_term)
+#         pe = pe.unsqueeze(0).transpose(0, 1)
+#         self.register_buffer("pe", pe)
+#         # torch.Size([60, 1, 256])
+
+#     def forward(self, x):
+#         # print(x.size(), self.pe.size())
+#         x = x + self.pe[: x.size(0), :]
+#         return self.dropout(x)
+
+
 class UniterConfig(object):
-    """Configuration class to store the configuration of a `UniterModel`.
-    """
-    def __init__(self,
-                 vocab_size_or_config_json_file,
-                 hidden_size=768,
-                 num_hidden_layers=12,
-                 num_attention_heads=12,
-                 intermediate_size=3072,
-                 hidden_act="gelu",
-                 hidden_dropout_prob=0.1,
-                 attention_probs_dropout_prob=0.1,
-                 max_position_embeddings=512,
-                 type_vocab_size=2,
-                 initializer_range=0.02):
+    """Configuration class to store the configuration of a `UniterModel`."""
+
+    def __init__(
+        self,
+        vocab_size_or_config_json_file,
+        hidden_size=768,
+        num_hidden_layers=12,
+        num_attention_heads=12,
+        intermediate_size=3072,
+        hidden_act="gelu",
+        hidden_dropout_prob=0.1,
+        attention_probs_dropout_prob=0.1,
+        max_position_embeddings=512,
+        type_vocab_size=2,
+        initializer_range=0.02,
+    ):
         """Constructs UniterConfig.
         Args:
             vocab_size_or_config_json_file: Vocabulary size of `inputs_ids` in
@@ -64,8 +108,7 @@ class UniterConfig(object):
                 for initializing all weight matrices.
         """
         if isinstance(vocab_size_or_config_json_file, Path):
-            with open(vocab_size_or_config_json_file,
-                      "r", encoding='utf-8') as reader:
+            with open(vocab_size_or_config_json_file, "r", encoding="utf-8") as reader:
                 json_config = json.loads(reader.read())
             for key, value in json_config.items():
                 self.__dict__[key] = value
@@ -82,14 +125,16 @@ class UniterConfig(object):
             self.type_vocab_size = type_vocab_size
             self.initializer_range = initializer_range
         else:
-            raise ValueError("First argument must be either a vocabulary size "
-                             "(int) or the path to a pretrained model config "
-                             "file (str)")
+            raise ValueError(
+                "First argument must be either a vocabulary size "
+                "(int) or the path to a pretrained model config "
+                "file (str)"
+            )
 
     @classmethod
     def from_dict(cls, json_object):
         """Constructs a `UniterConfig` from a
-           Python dictionary of parameters."""
+        Python dictionary of parameters."""
         config = UniterConfig(vocab_size_or_config_json_file=-1)
         for key, value in json_object.items():
             config.__dict__[key] = value
@@ -98,7 +143,7 @@ class UniterConfig(object):
     @classmethod
     def from_json_file(cls, json_file):
         """Constructs a `UniterConfig` from a json file of parameters."""
-        with open(json_file, "r", encoding='utf-8') as reader:
+        with open(json_file, "r", encoding="utf-8") as reader:
             text = reader.read()
         return cls.from_dict(json.loads(text))
 
@@ -116,9 +161,10 @@ class UniterConfig(object):
 
 
 class UniterPreTrainedModel(nn.Module):
-    """ An abstract class to handle weights initialization and
-        a simple interface for dowloading and loading pretrained models.
+    """An abstract class to handle weights initialization and
+    a simple interface for dowloading and loading pretrained models.
     """
+
     def __init__(self, config, *inputs, **kwargs):
         super().__init__()
         if not isinstance(config, UniterConfig):
@@ -128,18 +174,17 @@ class UniterPreTrainedModel(nn.Module):
                 "pretrained model use "
                 "`model = {}.from_pretrained(PRETRAINED_MODEL_NAME)`".format(
                     self.__class__.__name__, self.__class__.__name__
-                ))
+                )
+            )
         self.config = config
 
     def init_weights(self, module):
-        """ Initialize the weights.
-        """
+        """Initialize the weights."""
         if isinstance(module, (nn.Linear, nn.Embedding)):
             # Slightly different from the TF version which uses
             # truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
-            module.weight.data.normal_(mean=0.0,
-                                       std=self.config.initializer_range)
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
         elif isinstance(module, FusedLayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
@@ -166,10 +211,10 @@ class UniterPreTrainedModel(nn.Module):
         new_keys = []
         for key in state_dict.keys():
             new_key = None
-            if 'gamma' in key:
-                new_key = key.replace('gamma', 'weight')
-            if 'beta' in key:
-                new_key = key.replace('beta', 'bias')
+            if "gamma" in key:
+                new_key = key.replace("gamma", "weight")
+            if "beta" in key:
+                new_key = key.replace("beta", "bias")
             if new_key:
                 old_keys.append(key)
                 new_keys.append(new_key)
@@ -180,38 +225,47 @@ class UniterPreTrainedModel(nn.Module):
         unexpected_keys = []
         error_msgs = []
         # copy state_dict so _load_from_state_dict can modify it
-        metadata = getattr(state_dict, '_metadata', None)
+        metadata = getattr(state_dict, "_metadata", None)
         state_dict = state_dict.copy()
         if metadata is not None:
             state_dict._metadata = metadata
 
-        def load(module, prefix=''):
-            local_metadata = ({} if metadata is None
-                              else metadata.get(prefix[:-1], {}))
+        def load(module, prefix=""):
+            local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
             module._load_from_state_dict(
-                state_dict, prefix, local_metadata, True, missing_keys,
-                unexpected_keys, error_msgs)
+                state_dict,
+                prefix,
+                local_metadata,
+                True,
+                missing_keys,
+                unexpected_keys,
+                error_msgs,
+            )
             for name, child in module._modules.items():
                 if child is not None:
-                    load(child, prefix + name + '.')
-        start_prefix = ''
-        if not hasattr(model, 'bert') and any(s.startswith('bert.')
-                                              for s in state_dict.keys()):
-            start_prefix = 'bert.'
+                    load(child, prefix + name + ".")
+
+        start_prefix = ""
+        if not hasattr(model, "bert") and any(
+            s.startswith("bert.") for s in state_dict.keys()
+        ):
+            start_prefix = "bert."
         load(model, prefix=start_prefix)
         if len(missing_keys) > 0:
-            logger.info("Weights of {} not initialized from "
-                        "pretrained model: {}".format(
-                            model.__class__.__name__, missing_keys))
+            logger.info(
+                "Weights of {} not initialized from "
+                "pretrained model: {}".format(model.__class__.__name__, missing_keys)
+            )
         if len(unexpected_keys) > 0:
-            logger.info("Weights from pretrained model not used in "
-                        "{}: {}".format(
-                            model.__class__.__name__, unexpected_keys))
+            logger.info(
+                "Weights from pretrained model not used in "
+                "{}: {}".format(model.__class__.__name__, unexpected_keys)
+            )
         if len(error_msgs) > 0:
-            raise RuntimeError('Error(s) in loading state_dict for '
-                               '{}:\n\t{}'.format(
-                                   model.__class__.__name__,
-                                   "\n\t".join(error_msgs)))
+            raise RuntimeError(
+                "Error(s) in loading state_dict for "
+                "{}:\n\t{}".format(model.__class__.__name__, "\n\t".join(error_msgs))
+            )
         return model
 
 
@@ -277,17 +331,17 @@ class UniterEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         layer = BertLayer(config)
-        self.layer = nn.ModuleList([copy.deepcopy(layer)
-                                    for _ in range(config.num_hidden_layers)])
+        self.layer = nn.ModuleList(
+            [copy.deepcopy(layer) for _ in range(config.num_hidden_layers)]
+        )
 
-    def forward(self, input_, attention_mask,
-                output_all_encoded_layers=True):
+    def forward(self, input_, attention_mask, timestamps=None, output_all_encoded_layers=True):
         all_encoder_layers = ()
         all_attentions = ()
         hidden_states = input_
         for layer_module in self.layer:
             # hidden_states = layer_module(hidden_states, attention_mask)
-            layer_outputs = layer_module(hidden_states, attention_mask)
+            layer_outputs = layer_module(hidden_states, attention_mask, timestamps=timestamps)
             hidden_states = layer_outputs[0]
             attention = layer_outputs[1]
             all_attentions = all_attentions + (attention,)
@@ -297,27 +351,43 @@ class UniterEncoder(nn.Module):
             all_encoder_layers = all_encoder_layers + (hidden_states,)
         return all_encoder_layers, all_attentions
 
+
 class BertMIL(UniterPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.encoder = UniterEncoder(config)
         self.pooler = BertPooler(config)
         self.apply(self.init_weights)
-    
-    def forward(self, embeddings, attention_mask, output_all_encoded_layers=True):
+        self.pos_encoder = AbsPositionalEncoding(
+            config.hidden_size, config.max_position_embeddings + 1
+        )
+        self.cls_token = nn.Parameter(torch.randn(config.hidden_size))
+        self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
+
+    def forward(self, embeddings, attention_mask, timestamps=None, output_all_encoded_layers=True):
+        b = embeddings.size(0)
+        cls_mask = torch.tensor(
+            [[1.0]], device=attention_mask.device, dtype=attention_mask.dtype
+        )
+        cls_mask = repeat(cls_mask, "b s -> (repeat b) s", repeat=b)
+        attention_mask = torch.cat((cls_mask, attention_mask), dim=1)
+        cls_tokens = repeat(self.cls_token, "d -> b () d", b=b)
+        embeddings = torch.cat((cls_tokens, embeddings), dim=1)
+        if self.position_embedding_type == "absolute":
+            embeddings = self.pos_encoder(embeddings)
         extended_attention_mask = attention_mask[:, None, None, :]
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
         encoded_layers, attention_scores = self.encoder(
             embeddings,
             extended_attention_mask,
-            output_all_encoded_layers=output_all_encoded_layers
+            output_all_encoded_layers=output_all_encoded_layers,
+            timestamps=timestamps
         )
         if not output_all_encoded_layers:
             encoded_layers = encoded_layers[-1]
 
         pooled_out = self.pooler(encoded_layers[-1])
         return pooled_out, attention_scores
-
 
 
 # class UniterModel(UniterPreTrainedModel):

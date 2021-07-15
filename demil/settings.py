@@ -14,6 +14,7 @@ AVEC_AUDIO = Path(DATA_PATH, "avec2019", "audio_deep_features")
 AVEC_VIDEO = Path(DATA_PATH, "avec2019", "video_CNNs")
 AVEC_METADATA = Path(DATA_PATH, "avec2019", "metadata.csv")
 PATH_TO_INSTAGRAM_DATA = Path(DATA_PATH, "instagram")
+PATH_TO_DEPRESSBR = Path(DATA_PATH, "DepressBR")
 MODELS_PATH = Path(ROOT, "models")
 LOG_PATH = Path(ROOT, "data", "logs", "logs.txt")
 LANGUAGE_MODEL = "neuralmind/bert-base-portuguese-cased"
