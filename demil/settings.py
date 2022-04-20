@@ -14,6 +14,16 @@ AVEC_AUDIO = Path(DATA_PATH, "avec2019", "audio_deep_features")
 AVEC_VIDEO = Path(DATA_PATH, "avec2019", "video_CNNs")
 AVEC_METADATA = Path(DATA_PATH, "avec2019", "metadata.csv")
 PATH_TO_INSTAGRAM_DATA = Path(DATA_PATH, "instagram")
+
+# ===================== LOSADA =====================
+
+PATH_TO_ERISK = Path(DATA_PATH, "eRisk2021")
+PATH_TO_ERISK = Path(DATA_PATH, "eRisk2021")
+PATH_TO_LOSADA2016 = Path(DATA_PATH, "LOSADA2016")
+PATH_TO_ERISKLOSADA = Path(DATA_PATH, "eRisk+LOSADA")
+
+# ===================== LOSADA =====================
+
 PATH_TO_DEPRESSBR = Path(DATA_PATH, "DepressBR")
 MODELS_PATH = Path(ROOT, "models")
 LOG_PATH = Path(ROOT, "data", "logs", "logs.txt")
@@ -26,6 +36,10 @@ PATH_TO_BERT_CONFIG = Path(ROOT, "config", "config.json")
 BERTIMBAU = [
     "neuralmind/bert-base-portuguese-cased",
     "neuralmind/bert-large-portuguese-cased",
+]
+ENGLISH_BERT = [
+    "bert-base-cased",
+    "bert-base-uncased"
 ]
 XLM = ["xlm-roberta-base", "xlm-roberta-large"]
 

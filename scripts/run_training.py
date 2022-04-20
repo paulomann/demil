@@ -68,7 +68,7 @@ from transformers import AutoTokenizer
 )
 @click.option(
     "--period",
-    default=365,
+    default=-1,
     help=f"The observation period of the DepressionCorpus data.",
     type=click.INT,
 )
@@ -223,7 +223,7 @@ def train(
     parameters = locals()
     settings.MAX_SEQ_LENGTH = seq_len
     print(f"====> Parameters: {parameters}")
-    available_periods = [365, 212, 60]
+    available_periods = [365, 212, 60, -1]
     if period not in available_periods:
         raise ValueError(
             f"Period of {period} is not valid. Please, use one of the following: {available_periods}"

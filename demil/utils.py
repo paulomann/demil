@@ -56,16 +56,17 @@ def get_depressbr_dataset(dataset: Literal["train", "val", "test"]) -> List[Twit
 
 
 def load_dataframes(
-    period: Literal[60, 212, 365], dataset: Literal["train", "val", "test"]
+    dataset: Literal["DeprUFF", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"],
+    period: Literal[60, 212, 365, -1],
+    split: Literal["train", "val", "test"]
 ) -> pd.DataFrame:
-    if dataset == "train":
-        data = pd.read_csv(settings.DEPRESSION_CORPUS / f"{period}" / "train.csv")
-    elif dataset == "val":
-        data = pd.read_csv(settings.DEPRESSION_CORPUS / f"{period}" / "val.csv")
-    elif dataset == "test":
-        data = pd.read_csv(settings.DEPRESSION_CORPUS / f"{period}" / "test.csv")
+    if period != -1:
+        if split in ["train", "val", "test"]:
+            data = pd.read_csv(settings.DEPRESSION_CORPUS / f"{period}" / f"{split}.csv")
+        else:
+            raise ValueError(f"The {split=} parameter does not exist.")
     else:
-        raise ValueError(f"The {dataset=} parameter does not exist.")
+        data = pd.read_csv(Path(settings.DATA_PATH, dataset, f"{split}.csv"))
 
     return data
 

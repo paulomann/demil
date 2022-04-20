@@ -177,7 +177,8 @@ def depressbr_collate_fn(data: Tuple):
 class DepressionCorpus(torch.utils.data.Dataset):
     def __init__(
         self,
-        period: Literal[60, 212, 365],
+        dataset: Literal["DeprUFF", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"],
+        period: Literal[60, 212, 365, -1],
         dataset_type: Literal["train", "val", "test"],
         tokenizer: PreTrainedTokenizer,
         regression: bool = False,
@@ -186,7 +187,7 @@ class DepressionCorpus(torch.utils.data.Dataset):
         get_raw_data: bool = False,
         shuffle_posts: bool = False,
     ):
-        self.dataset = get_dataset(period, dataset_type)
+        self.dataset = get_dataset(dataset, period, dataset_type)
         self.dataset_type = dataset_type
         self.tokenizer = tokenizer
         self.regression = regression
@@ -260,13 +261,14 @@ class DepressionCorpus(torch.utils.data.Dataset):
             if i > self.max_seq_length:
                 break
             captions.insert(0, post[CAPTION_IDX])
-            img_path = settings.PATH_TO_INSTAGRAM_DATA / post[IMG_PATH_IDX]
-            image = Image.open(img_path)
-            img = image.copy()
-            image.close()
-            if not self.get_raw_data:
-                img = self.transform(img)
-            images.insert(0, img)
+            if not pd.isna(post[IMG_PATH_IDX]):
+                img_path = settings.PATH_TO_INSTAGRAM_DATA / post[IMG_PATH_IDX]
+                image = Image.open(img_path)
+                img = image.copy()
+                image.close()
+                if not self.get_raw_data:
+                    img = self.transform(img)
+                images.insert(0, img)
             timestamps.insert(0, post[TIMESTAMP_IDX].to_pydatetime())
 
         timestamps = self.get_time_slots(timestamps)
@@ -284,8 +286,12 @@ class DepressionCorpus(torch.utils.data.Dataset):
             return_attention_mask=True,
             truncation=True,
         )
-        images = torch.stack(images)
+
         captions_tensors["attention_mask"] = captions_tensors["attention_mask"].float()
+        if images:
+            images = torch.stack(images)
+        else:
+            images = torch.zeros_like(captions_tensors["attention_mask"])
 
         return (captions_tensors, images, timestamps, score)
 
@@ -293,7 +299,7 @@ class DepressionCorpus(torch.utils.data.Dataset):
 def get_input_ids_attn_mask(
     n_tokens: int, device: torch.device, i_ids_dtype: torch.dtype, attn_dtype: torch.dtype
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if settings.LANGUAGE_MODEL in settings.BERTIMBAU:
+    if settings.LANGUAGE_MODEL in settings.BERTIMBAU or settings.LANGUAGE_MODEL in settings.ENGLISH_BERT:
         input_ids = torch.zeros(size=(1, n_tokens), device=device, dtype=i_ids_dtype)
         input_ids[0][0], input_ids[0][1] = 101, 102
         attn_mask = torch.zeros(size=(1, n_tokens), device=device, dtype=attn_dtype)
@@ -377,15 +383,17 @@ def collate_fn(data: Tuple):
 
 
 def get_dataset(
-    period: Literal[60, 212, 365], dataset: Literal["train", "val", "test"]
+    dataset: Literal["DeprUFF", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"], 
+    period: Literal[60, 212, 365, -1],
+    split: Literal["train", "val", "test"]
 ) -> List[User]:
-    data = utils.load_dataframes(period, dataset)
+    data = utils.load_dataframes(dataset, period, split)
     data = utils.get_users_info(utils.sort_by_date(data))
     return data
 
 
 def get_dataloaders(
-    period: Literal[60, 212, 365],
+    period: Literal[60, 212, 365, -1],
     batch_size: int,
     collate_fn,
     shuffle: bool,
@@ -395,33 +403,22 @@ def get_dataloaders(
     dataset: Literal["DeprUFF", "DepressBR"] = "DeprUFF",
     shuffle_posts: bool = False,
 ):
-    available_datasets = ["DeprUFF", "DepressBR"]
+    available_datasets = ["DeprUFF", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"]
     if dataset not in available_datasets:
         raise ValueError(f"Dataset is not one of the following: {available_datasets}")
     if tokenizer is None:
         tokenizer = AutoTokenizer.from_pretrained(settings.LANGUAGE_MODEL)
 
-    if dataset == "DeprUFF":
-        train = DepressionCorpus(
-            period,
-            "train",
-            tokenizer,
-            regression,
-            data_augmentation=augment_data,
-            shuffle_posts=shuffle_posts,
-        )
-        val = DepressionCorpus(
-            period, "val", tokenizer, regression, data_augmentation=augment_data
-        )
-        test = DepressionCorpus(
-            period, "test", tokenizer, regression, data_augmentation=augment_data
-        )
-        collate = collate_fn
-    elif dataset == "DepressBR":
+    if dataset == "DepressBR":
         train = DepressBR("train", tokenizer, data_augmentation=augment_data)
         val = DepressBR("val", tokenizer, data_augmentation=augment_data)
         test = DepressBR("test", tokenizer, data_augmentation=augment_data)
         collate = depressbr_collate_fn
+    else:
+        train = DepressionCorpus(dataset, period, "train", tokenizer, regression, data_augmentation=augment_data, shuffle_posts=shuffle_posts)
+        val = DepressionCorpus(dataset, period, "val", tokenizer, regression, data_augmentation=augment_data)
+        test = DepressionCorpus(dataset, period, "test", tokenizer, regression, data_augmentation=augment_data)
+        collate = collate_fn
 
     train_loader = DataLoader(
         train,
