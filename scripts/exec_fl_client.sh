@@ -1,0 +1,2 @@
+#!/bin/bash
+python fl_client.py --gpu 0 --bsz 8 --epochs 50 --no-use-mask --ignore-pad --gradient-clip-val 1.0 --num-encoder-layers 1 --d-model 128 --lr 1e-3 --weight-decay 1e-6 --period -1 --language-model neuralmind/bert-base-portuguese-cased --text --no-visual --rnn-type lstm --shuffle --name LSTM --no-wandb --dataset eRisk2021

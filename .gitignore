@@ -140,3 +140,7 @@ models
 
 # virtualenv
 venv_fl/
+
+
+# screen logs
+screen*
