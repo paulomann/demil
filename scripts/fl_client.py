@@ -7,8 +7,8 @@ from pytorch_lightning import seed_everything
 from typing import Literal, List
 from demil.data import get_dataloaders
 from demil import settings
-from demil.data import collate_fn
-from demil.models import MMIL
+from demil.data import collate_fn_mil
+from demil.models import MMIL, MSIL
 import click
 from transformers import AutoTokenizer
 
@@ -182,12 +182,18 @@ from collections import OrderedDict
     help=f"Whether to randomize the order of posts or not.",
     default=False,
 )
+@click.option(
+    "--mil/--no-mil",
+    is_flag=True,
+    help=f"Whether to randomize the order of posts or not.",
+    default=True,
+)
 def main(gpu: int, name: str, bsz: int, epochs: int, use_mask: bool, gradient_clip_val: float, 
 log_every_n_steps: int, nhead: int, num_encoder_layers: int, num_decoder_layers: int, d_model: int, 
 ignore_pad: bool, lr: float, b1: float, b2: float, eps: float, weight_decay: float, correct_bias: bool, 
 period: int, language_model: str, vis_model: str, wandb: bool, rnn_type: str, shuffle: bool, seed: int, 
 overfit: float, attention: bool, seq_len: int, weight: bool, teacher_force: float, augment_data: bool,
-text: bool, visual: bool, pos_embedding: str, timestamp: bool, dataset: str, shuffle_posts: bool):
+text: bool, visual: bool, pos_embedding: str, timestamp: bool, dataset: str, shuffle_posts: bool, mil: bool):
     seed_everything(seed)
     parameters = locals()
     settings.MAX_SEQ_LENGTH = seq_len
@@ -205,19 +211,17 @@ text: bool, visual: bool, pos_embedding: str, timestamp: bool, dataset: str, shu
     train, val, test = get_dataloaders(
         period=period,
         batch_size=bsz,
-        collate_fn=collate_fn,
+        collate_fn=collate_fn_mil if mil else None,
         shuffle=shuffle,
         tokenizer=tokenizer,
         augment_data=augment_data,
         dataset=dataset,
-        shuffle_posts=shuffle_posts
+        shuffle_posts=shuffle_posts,
+        mil=mil,
+        use_visual=visual
     )
     gradient_accumulation_steps = 1
     t_total = (len(train) // gradient_accumulation_steps) * epochs
-    scheduler_args = {
-        "num_warmup_steps": int(t_total * 0.1),
-        "num_training_steps": t_total,
-    }
     optimizer_args = {
         "lr": lr,
         "betas": (b1, b2),
@@ -225,56 +229,70 @@ text: bool, visual: bool, pos_embedding: str, timestamp: bool, dataset: str, shu
         "weight_decay": weight_decay,
         "correct_bias": correct_bias,
     }
-    parameters.update(scheduler_args)
-    wandb_logger = WandbLogger(project="demil", name=name, config=parameters)
     checkpoint_callback = ModelCheckpoint(
         monitor="val_acc",
         mode="max",
     )
-    if not wandb:
-        wandb_logger = None
-    model = MMIL(
-        scheduler_args=scheduler_args,
-        optimizer_args=optimizer_args,
-        use_mask=use_mask,
-        nhead=nhead,
-        num_encoder_layers=num_encoder_layers,
-        num_decoder_layers=num_decoder_layers,
-        d_model=d_model,
-        ignore_pad=ignore_pad,
-        language_model=language_model,
-        vis_model=vis_model,
-        rnn_type=rnn_type,
-        attention=attention,
-        weight=weight,
-        teacher_force=teacher_force,
-        text=text,
-        visual=visual,
-        pos_embedding=pos_embedding,
-        timestamp=timestamp
-    )
-    trainer = pl.Trainer(
-        deterministic=True,
-        max_steps=t_total,
-        logger=wandb_logger if wandb else None,
-        gpus=[gpu],
-        accumulate_grad_batches=gradient_accumulation_steps,
-        track_grad_norm=2,
-        gradient_clip_val=gradient_clip_val,
-        log_every_n_steps=log_every_n_steps,
-        checkpoint_callback=checkpoint_callback,
-        default_root_dir=settings.MODELS_PATH,
-        overfit_batches=overfit
-    )
+    wandb_logger = None
+    if wandb:
+        wandb_logger = WandbLogger(project="flower", name=name, config=parameters)
+    if mil:
+        model = MMIL(
+            scheduler_args={},
+            optimizer_args=optimizer_args,
+            use_mask=use_mask,
+            nhead=nhead,
+            num_encoder_layers=num_encoder_layers,
+            num_decoder_layers=num_decoder_layers,
+            d_model=d_model,
+            ignore_pad=ignore_pad,
+            language_model=language_model,
+            vis_model=vis_model,
+            rnn_type=rnn_type,
+            attention=attention,
+            weight=weight,
+            teacher_force=teacher_force,
+            text=text,
+            visual=visual,
+            pos_embedding=pos_embedding,
+            timestamp=timestamp
+        )
+    else:
+        model = MSIL(
+            scheduler_args={},
+            optimizer_args=optimizer_args,
+            language_model=language_model,
+            vis_model=vis_model,
+            text=text,
+            visual=visual,
+            clf_features=d_model,
+            weight=weight
+        )
+    trainer_params = {
+        "deterministic":True,
+        "max_steps":t_total,
+        "logger":wandb_logger if wandb else None,
+        "gpus":[gpu],
+        "accumulate_grad_batches":gradient_accumulation_steps,
+        "track_grad_norm":2,
+        "gradient_clip_val":gradient_clip_val,
+        "log_every_n_steps":log_every_n_steps,
+        "enable_checkpointing":False,
+        "checkpoint_callback":checkpoint_callback,
+        "default_root_dir":settings.MODELS_PATH,
+        "overfit_batches":overfit,
+        "num_sanity_val_steps":0
+    }
 
     # Flower client
-    client = FlowerClient(model=model, trainer=trainer, train=train, val=val, test=test)
+    client = FlowerClient(model=model, trainer_params=trainer_params, train=train, val=val, test=test)
     fl.client.start_numpy_client("[::]:8080", client)
 
 class FlowerClient(fl.client.NumPyClient):
-    def __init__(self, model, trainer:pl.Trainer, train, val, test):
+    def __init__(self, model, trainer_params, train, val, test):
         self.model = model
-        self.trainer = trainer
+        self.trainer = pl.Trainer(**trainer_params)
+        self.trainer_params = trainer_params
         self.train = train
         self.val = val
         self.test = test
@@ -286,19 +304,35 @@ class FlowerClient(fl.client.NumPyClient):
         _set_parameters(self.model, parameters)
 
     def fit(self, parameters, config):
+        print("===========Fit Function")
         self.set_parameters(parameters)
 
+        self.trainer = pl.Trainer(**self.trainer_params)
+
+        # print("====BEFORE TRAINING: ", end="")
+        # for name, param in zip(range(5), self.model.classifier.named_parameters()):
+        #     print(name, param[:5])
+        #     break
+        
         self.trainer.fit(self.model, self.train, self.val)
 
-        return self.get_parameters(), 55000, {}
+        # print("====AFTER TRAINING: ", end="")
+
+        # for name, param in zip(range(5), self.model.classifier.named_parameters()):
+        #     print(name, param[:5])
+        #     break
+
+        return self.get_parameters(), len(self.train.dataset), {}
 
     def evaluate(self, parameters, config):
+        print("===========Evaluate Function")
         self.set_parameters(parameters)
 
-        results = self.trainer.test(test_dataloaders=self.test)
+        results = self.trainer.test(self.model, dataloaders=self.test)
+        print(f"===>Results: {results}")
         loss = results[0]["test_loss"]
 
-        return loss, len(self.test), {"loss": loss}
+        return loss, len(self.test.dataset), results[0]
 
 
 def _get_parameters(model):

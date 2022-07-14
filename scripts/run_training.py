@@ -7,8 +7,8 @@ from pytorch_lightning import seed_everything
 from typing import Literal, List
 from demil.data import get_dataloaders
 from demil import settings
-from demil.data import collate_fn
-from demil.models import MMIL
+from demil.data import collate_fn_mil
+from demil.models import MMIL, MSIL
 import click
 from transformers import AutoTokenizer
 
@@ -180,6 +180,12 @@ from transformers import AutoTokenizer
     help=f"Whether to randomize the order of posts or not.",
     default=False,
 )
+@click.option(
+    "--mil/--no-mil",
+    is_flag=True,
+    help=f"Whether to randomize the order of posts or not.",
+    default=True,
+)
 def train(
     gpu: int,
     name: str,
@@ -217,7 +223,8 @@ def train(
     pos_embedding: str,
     timestamp: bool,
     dataset: str,
-    shuffle_posts: bool
+    shuffle_posts: bool,
+    mil: bool
 ):
     seed_everything(seed)
     parameters = locals()
@@ -236,12 +243,14 @@ def train(
     train, val, test = get_dataloaders(
         period=period,
         batch_size=bsz,
-        collate_fn=collate_fn,
+        collate_fn=collate_fn_mil if mil else None,
         shuffle=shuffle,
         tokenizer=tokenizer,
         augment_data=augment_data,
         dataset=dataset,
-        shuffle_posts=shuffle_posts
+        shuffle_posts=shuffle_posts,
+        mil=mil,
+        use_visual=visual
     )
     gradient_accumulation_steps = 1
     t_total = (len(train) // gradient_accumulation_steps) * epochs
@@ -257,33 +266,46 @@ def train(
         "correct_bias": correct_bias,
     }
     parameters.update(scheduler_args)
-    wandb_logger = WandbLogger(project="demil", name=name, config=parameters)
     checkpoint_callback = ModelCheckpoint(
         monitor="val_acc",
         mode="max",
     )
-    if not wandb:
-        wandb_logger = None
-    model = MMIL(
-        scheduler_args=scheduler_args,
-        optimizer_args=optimizer_args,
-        use_mask=use_mask,
-        nhead=nhead,
-        num_encoder_layers=num_encoder_layers,
-        num_decoder_layers=num_decoder_layers,
-        d_model=d_model,
-        ignore_pad=ignore_pad,
-        language_model=language_model,
-        vis_model=vis_model,
-        rnn_type=rnn_type,
-        attention=attention,
-        weight=weight,
-        teacher_force=teacher_force,
-        text=text,
-        visual=visual,
-        pos_embedding=pos_embedding,
-        timestamp=timestamp
-    )
+    wandb_logger = None
+    if wandb:
+        wandb_logger = WandbLogger(project="demil", name=name, config=parameters)
+
+    if mil:
+        model = MMIL(
+            scheduler_args=scheduler_args,
+            optimizer_args=optimizer_args,
+            use_mask=use_mask,
+            nhead=nhead,
+            num_encoder_layers=num_encoder_layers,
+            num_decoder_layers=num_decoder_layers,
+            d_model=d_model,
+            ignore_pad=ignore_pad,
+            language_model=language_model,
+            vis_model=vis_model,
+            rnn_type=rnn_type,
+            attention=attention,
+            weight=weight,
+            teacher_force=teacher_force,
+            text=text,
+            visual=visual,
+            pos_embedding=pos_embedding,
+            timestamp=timestamp
+        )
+    else:
+        model = MSIL(
+            scheduler_args=scheduler_args,
+            optimizer_args=optimizer_args,
+            language_model=language_model,
+            vis_model=vis_model,
+            text=text,
+            visual=visual,
+            clf_features=d_model,
+            weight=weight
+        )
     trainer = pl.Trainer(
         deterministic=True,
         max_steps=t_total,
@@ -298,7 +320,7 @@ def train(
         overfit_batches=overfit
     )
     trainer.fit(model, train, val)
-    trainer.test(test_dataloaders=test)
+    trainer.test(dataloaders=test, ckpt_path='best')
 
 
 if __name__ == "__main__":

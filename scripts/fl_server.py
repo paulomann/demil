@@ -37,6 +37,18 @@ def get_args():
     args = parser.parse_args()
     return args
 
+def aggregate_metrics(eval_metrics):
+    print("====EVAL_METRICS: ", eval_metrics)
+    precision, recall, fscore, denominator = 0, 0, 0, 0
+    for info in eval_metrics:
+        size, metrics = info
+        precision += metrics["precision"] * size
+        recall += metrics["recall"] * size
+        fscore += metrics["fscore"] * size
+        denominator += size
+    
+    return {"precision": precision/denominator, "recall": recall/denominator, "fscore": fscore/denominator}            
+
 
 def main() -> None:
     args = get_args()
@@ -47,7 +59,8 @@ def main() -> None:
         fraction_eval=args.sample_fraction,
         min_fit_clients=args.min_sample_size,
         min_eval_clients=args.min_sample_size,
-        min_available_clients=args.min_num_clients
+        min_available_clients=args.min_num_clients,
+        evaluate_metrics_aggregation_fn=aggregate_metrics
     )
 
     # Start Flower server for three rounds of federated learning

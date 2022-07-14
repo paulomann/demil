@@ -12,17 +12,21 @@ from demil.transformer import UniterConfig
 import torch
 
 
+Username = str
+Label = int
+
+Post = Tuple[str, Path, datetime, Username, Label]
+
 @dataclass
 class User:
-    username: str
-    bdi: int
+    username: Username
+    bdi: Label
     posts: List[Tuple[str, Path, datetime]]
-
 
 @dataclass
 class TwitterUser:
-    username: str
-    label: int
+    username: Username
+    label: Label
     posts: List[str]
 
 
@@ -56,15 +60,15 @@ def get_depressbr_dataset(dataset: Literal["train", "val", "test"]) -> List[Twit
 
 
 def load_dataframes(
-    dataset: Literal["DeprUFF", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"],
+    dataset: Literal["instagram", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"],
     period: Literal[60, 212, 365, -1],
     split: Literal["train", "val", "test"]
 ) -> pd.DataFrame:
-    if period != -1:
-        if split in ["train", "val", "test"]:
-            data = pd.read_csv(settings.DEPRESSION_CORPUS / f"{period}" / f"{split}.csv")
-        else:
-            raise ValueError(f"The {split=} parameter does not exist.")
+    if split not in ["train", "val", "test"]:
+        raise ValueError(f"The {split=} parameter does not exist.")
+
+    if dataset == "instagram" and period != -1:
+        data = pd.read_csv(settings.DEPRESSION_CORPUS / f"{period}" / f"{split}.csv")
     else:
         data = pd.read_csv(Path(settings.DATA_PATH, dataset, f"{split}.csv"))
 
@@ -99,7 +103,22 @@ def get_users_info(df: pd.DataFrame) -> List[User]:
     return users_list
 
 
-def get_dataset(
+def get_posts_info(df: pd.DataFrame) -> List[Post]:
+    posts = []
+    for row in df.iterrows():
+        row = row[1]
+        caption = row.caption
+        username = row.username
+        bdi = row.bdi
+        image_path = row.img
+        date = row.date
+        if caption is np.nan:
+            caption = ""
+        posts.append((caption, image_path, date, username, bdi))
+    return posts
+
+
+def get_mil_dataset(
     period: Literal[60, 212, 365], dataset: Literal["train", "val", "test"]
 ) -> List[User]:
     data = load_dataframes(period, dataset)
@@ -112,9 +131,9 @@ def get_statistics_for_posts():
     for p in periods:
         qty = []
         train, val, test = (
-            get_dataset(p, "train"),
-            get_dataset(p, "val"),
-            get_dataset(p, "test"),
+            get_mil_dataset(p, "train"),
+            get_mil_dataset(p, "val"),
+            get_mil_dataset(p, "test"),
         )
         print()
         all_users = []

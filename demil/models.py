@@ -488,7 +488,7 @@ class MMIL(pl.LightningModule):
             )
 
             x = textual_ftrs * visual_ftrs
-            pooled_out, attn_weights = self.rnn(x, input_lengths)
+            pooled_out, attn_weights = self.rnn(x, input_lengths.to("cpu"))
 
         elif self.rnn_type == "bert":
 
@@ -514,8 +514,12 @@ class MMIL(pl.LightningModule):
     def configure_optimizers(self):
         print(f"Optimizer args: {self.optimizer_args}")
         optimizer = AdamW(self.parameters(), **self.optimizer_args)
-        scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
-        return [optimizer], [scheduler]
+        
+        if self.scheduler_args:
+            scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
+            return [optimizer], [scheduler]
+        
+        return optimizer
 
     def training_step(self, train_batch, batch_idx):
         *_, labels = train_batch
@@ -608,41 +612,49 @@ class MMIL(pl.LightningModule):
         labels = labels.cpu().tolist()
         probas = probas.cpu().tolist()
         preds = preds.cpu().tolist()
+        loss = loss.cpu().tolist()
         # return (labels, probas, preds, attn_weights, loss, inpt)
-        return (labels, probas, preds)
+        return (labels, probas, preds, loss)
 
     def test_epoch_end(self, outputs):
         labels = []
         probas = []
         preds = []
+        loss = []
         for i in outputs:
             labels.extend(i[0])
             probas.extend(i[1])
             preds.extend(i[2])
+            loss.extend(i[3])
 
         print()
         print(f"===>TEST PREDS: {preds}")
         print(f"===>TEST LABEL: {labels}")
         print()
 
-        self.logger.experiment.log(
-            {
-                "roc": wandb.plots.ROC(
-                    np.array(labels), np.array(probas), ["Not Depressed", "Depressed"]
-                )
-            }
-        )
-        self.logger.experiment.log(
-            {
-                "cm": wandb.sklearn.plot_confusion_matrix(
-                    np.array(labels), np.array(preds), ["Not Depressed", "Depressed"]
-                )
-            }
-        )
+        # self.logger.experiment.log(
+        #     {
+        #         "roc": wandb.plots.ROC(
+        #             np.array(labels), np.array(probas), ["Not Depressed", "Depressed"]
+        #         )
+        #     }
+        # )
+        # self.logger.experiment.log(
+        #     {
+        #         "cm": wandb.sklearn.plot_confusion_matrix(
+        #             np.array(labels), np.array(preds), ["Not Depressed", "Depressed"]
+        #         )
+        #     }
+        # )
+        # precision, recall, fscore, _ = precision_recall_fscore_support(
+        #     labels, preds, average="binary"
+        # )
+        # self.log_dict({"precision": precision, "recall": recall, "fscore": fscore})
         precision, recall, fscore, _ = precision_recall_fscore_support(
             labels, preds, average="binary"
         )
-        self.log_dict({"precision": precision, "recall": recall, "fscore": fscore})
+        self.log_dict({"precision": precision, "recall": recall, "fscore": fscore, "test_loss": sum(loss)/len(loss)})
+        print(f"Precision: {precision}\nRecall: {recall}\nFscore: {fscore}")
 
     def init_layers(self):
         init_weights(
@@ -665,6 +677,229 @@ class MMIL(pl.LightningModule):
 #      nn.init.xavier_normal(param)
         else:
             pass
+
+    def freeze_layers(self, text_encoder: AutoModel, vis_encoder: ResNet):
+        for child in vis_encoder.children():
+            for param in child.parameters():
+                param.requires_grad = False
+
+        # textual
+        for name, param in text_encoder.named_parameters():
+            param.requires_grad = False
+
+        for name, param in text_encoder.pooler.named_parameters():
+            param.requires_grad = True
+
+        # Here we freeze all layers except the topmost layer.
+        # for both textual and visual encoders
+
+
+# Multimodal Single instance learning
+class MSIL(pl.LightningModule):
+    def __init__(
+        self,
+        scheduler_args: Dict[str, int] = None,
+        optimizer_args: Dict[str, int] = None,
+        vis_model: str = settings.VISUAL_MODEL,
+        language_model: str = settings.LANGUAGE_MODEL,
+        text: bool = True,
+        visual: bool = True,
+        clf_features: int = 512,
+        weight: bool = False
+    ):
+        super().__init__()
+        self.scheduler_args = scheduler_args
+        self.optimizer_args = optimizer_args
+        self.text_encoder = AutoModel.from_pretrained(language_model)
+        self.visual_encoder = getattr(models, vis_model)(pretrained=True)
+        self.visual_encoder.fc = nn.Identity()
+        self.dropout = nn.Dropout(0.2)
+        self.text_proj = nn.Linear(self.text_encoder.pooler.dense.out_features, clf_features)
+        self.vis_proj = nn.Linear(512, clf_features)
+        self.classifier = nn.Linear(clf_features, 2)
+        self.vis_norm = nn.LayerNorm(512)
+        self.txt_norm = nn.LayerNorm(self.text_encoder.pooler.dense.out_features)
+        self.relu = nn.ReLU()
+        self.text = text
+        self.visual = visual
+        self.weight = weight
+
+        self.init_layers()
+        self.freeze_layers(
+            self.text_encoder,
+            self.visual_encoder,
+        )
+        self.save_hyperparameters()
+
+    def forward(self, batch):
+        input_ids, attn_mask, imgs, labels = batch
+
+        textual_ftrs = 1
+        visual_ftrs = 1
+        if self.text:
+
+            textual_ftrs = self.text_encoder(input_ids.squeeze(), attn_mask.squeeze())[-1]
+            textual_ftrs = self.dropout(self.text_proj(self.txt_norm(textual_ftrs)))
+
+        if self.visual:
+
+            visual_ftrs = self.visual_encoder(imgs)
+            visual_ftrs = self.dropout(self.vis_proj(self.vis_norm(visual_ftrs)))
+
+        x = textual_ftrs * visual_ftrs
+
+        logits = self.classifier(x)
+
+        return logits
+
+    def configure_optimizers(self):
+        print(f"Optimizer args: {self.optimizer_args}")
+        optimizer = AdamW(self.parameters(), **self.optimizer_args)
+
+        if self.scheduler_args:
+            scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
+            return [optimizer], [scheduler]
+        
+        return optimizer
+
+    def training_step(self, train_batch, batch_idx):
+        *_, labels = train_batch
+        logits = self(train_batch)
+        if labels is not None:
+            if self.weight:
+                w = torch.tensor([1.47, 1], dtype=logits.dtype, device=logits.device)
+                loss_fct = nn.CrossEntropyLoss(weight=w)
+            else:
+                loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(logits.view(-1, 2), labels.view(-1))
+
+        with torch.no_grad():
+            preds = F.softmax(logits, dim=-1).argmax(dim=-1)
+            acc = ((preds == labels).sum().float()) / len(labels)
+            print()
+            print(f"===>TRAIN PREDS: {preds}")
+            print(f"===>TRAIN LABEL: {labels}")
+            print(f"===>TRAIN ACCUR: {acc}")
+            print()
+
+        preds = preds.unsqueeze(0) if preds.dim() == 0 else preds
+        return {"loss": loss, "preds": preds, "targets": labels}
+
+    def training_epoch_end(self, outs):
+        preds = []
+        targets = []
+        losses = []
+        for out in outs:
+            losses.append(out["loss"] * len(out["targets"]))
+            targets.append(out["targets"])
+            preds.append(out["preds"])
+
+        preds = torch.cat(preds)
+        targets = torch.cat(targets)
+        loss = sum(losses) / len(targets)
+        acc = ((preds == targets).sum().float()) / len(targets)
+        print()
+        print(f"===>TRAIN BATCH ACCUR: {acc}")
+        print()
+        self.log_dict({"train_loss": loss, "train_acc": acc})
+
+    def validation_step(self, val_batch, batch_idx):
+        *_, labels = val_batch
+        logits = self(val_batch)
+        if labels is not None:
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(logits.view(-1, 2), labels.view(-1))
+
+        preds = F.softmax(logits, dim=-1).argmax(dim=-1)
+        acc = ((preds == labels).sum().float()) / len(labels)
+        print()
+        print(f"===>VAL PREDS: {preds}")
+        print(f"===>VAL LABEL: {labels}")
+        print(f"===>VAL ACCUR: {acc}")
+        print()
+
+        preds = preds.unsqueeze(0) if preds.dim() == 0 else preds
+        return {"val_loss": loss, "preds": preds, "targets": labels}
+
+    def validation_epoch_end(self, outs):
+        preds = []
+        targets = []
+        losses = []
+        for out in outs:
+            losses.append(out["val_loss"] * len(out["targets"]))
+            targets.append(out["targets"])
+            preds.append(out["preds"])
+
+        preds = torch.cat(preds)
+        targets = torch.cat(targets)
+        loss = sum(losses) / len(targets)
+        acc = ((preds == targets).sum().float()) / len(targets)
+        print()
+        print(f"===>VAL BATCH ACCUR: {acc}")
+        print()
+        self.log_dict({"val_loss": loss, "val_acc": acc})
+
+    def test_step(self, test_batch, batch_idx):
+        *_, labels = test_batch
+        logits = self(test_batch)
+        preds = F.softmax(logits, dim=-1).argmax(dim=-1)
+        probas = F.softmax(logits, dim=-1)
+
+        if labels is not None:
+            loss_fct = nn.CrossEntropyLoss(reduction="none")
+            loss = loss_fct(logits.view(-1, 2), labels.view(-1)).cpu()
+
+        labels = labels.cpu().tolist()
+        probas = probas.cpu().tolist()
+        preds = preds.cpu().tolist()
+        loss = loss.cpu().tolist()
+        # return (labels, probas, preds, attn_weights, loss, inpt)
+        return (labels, probas, preds, loss)
+
+    def test_epoch_end(self, outputs):
+        labels = []
+        probas = []
+        preds = []
+        loss = []
+        for i in outputs:
+            labels.extend(i[0])
+            probas.extend(i[1])
+            preds.extend(i[2])
+            loss.extend(i[3])
+
+        print()
+        print(f"===>TEST PREDS: {preds}")
+        print(f"===>TEST LABEL: {labels}")
+        print()
+
+        # self.logger.experiment.log(
+        #     {
+        #         "roc": wandb.plots.ROC(
+        #             np.array(labels), np.array(probas), ["Not Depressed", "Depressed"]
+        #         )
+        #     }
+        # )
+        # self.logger.experiment.log(
+        #     {
+        #         "cm": wandb.sklearn.plot_confusion_matrix(
+        #             np.array(labels), np.array(preds), ["Not Depressed", "Depressed"]
+        #         )
+        #     }
+        # )
+        # precision, recall, fscore, _ = precision_recall_fscore_support(
+        #     labels, preds, average="binary"
+        # )
+        # self.log_dict({"precision": precision, "recall": recall, "fscore": fscore})
+        precision, recall, fscore, _ = precision_recall_fscore_support(
+            labels, preds, average="binary"
+        )
+        self.log_dict({"precision": precision, "recall": recall, "fscore": fscore, "test_loss": sum(loss)/len(loss)})
+        print(f"Precision: {precision}\nRecall: {recall}\nFscore: {fscore}")
+
+    def init_layers(self):
+        init_weights(
+            self.text_proj, self.vis_proj, self.classifier, self.vis_norm, self.txt_norm
+        )
 
     def freeze_layers(self, text_encoder: AutoModel, vis_encoder: ResNet):
         for child in vis_encoder.children():

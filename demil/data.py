@@ -6,12 +6,13 @@ from torchvision import transforms
 from PIL import Image
 from demil import settings
 import demil.utils as utils
-from demil.utils import User, TwitterUser
+from demil.utils import User, TwitterUser, Post
 import pandas as pd
 import scipy.io as sio
 import copy
 import random
 from datetime import datetime
+from pathlib import Path
 
 
 def shuffle_posts(
@@ -177,7 +178,7 @@ def depressbr_collate_fn(data: Tuple):
 class DepressionCorpus(torch.utils.data.Dataset):
     def __init__(
         self,
-        dataset: Literal["DeprUFF", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"],
+        dataset: Literal["instagram", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"],
         period: Literal[60, 212, 365, -1],
         dataset_type: Literal["train", "val", "test"],
         tokenizer: PreTrainedTokenizer,
@@ -186,8 +187,10 @@ class DepressionCorpus(torch.utils.data.Dataset):
         data_augmentation: bool = False,
         get_raw_data: bool = False,
         shuffle_posts: bool = False,
+        mil: bool = True,
+        use_visual: bool = False
     ):
-        self.dataset = get_dataset(dataset, period, dataset_type)
+        self.dataset = get_mil_dataset(dataset, period, dataset_type) if mil else get_sil_dataset(dataset, period, dataset_type)
         self.dataset_type = dataset_type
         self.tokenizer = tokenizer
         self.regression = regression
@@ -195,6 +198,8 @@ class DepressionCorpus(torch.utils.data.Dataset):
         self.shuffle_posts = shuffle_posts
         self.data_augmentation = data_augmentation
         self.get_raw_data = get_raw_data
+        self.mil = mil
+        self.use_visual = use_visual
         # if self.data_augmentation and self.dataset_type == "train":
         #     self.dataset = augment_data(self.dataset)
         self.transform = transforms.Compose(
@@ -239,8 +244,8 @@ class DepressionCorpus(torch.utils.data.Dataset):
             return 0
         else:
             return 1
-
-    def __getitem__(self, i):
+    
+    def getitem_mil(self, i):
         CAPTION_IDX = 0
         IMG_PATH_IDX = 1
         TIMESTAMP_IDX = 2
@@ -261,7 +266,7 @@ class DepressionCorpus(torch.utils.data.Dataset):
             if i > self.max_seq_length:
                 break
             captions.insert(0, post[CAPTION_IDX])
-            if not pd.isna(post[IMG_PATH_IDX]):
+            if not pd.isna(post[IMG_PATH_IDX]) and self.use_visual:
                 img_path = settings.PATH_TO_INSTAGRAM_DATA / post[IMG_PATH_IDX]
                 image = Image.open(img_path)
                 img = image.copy()
@@ -291,9 +296,49 @@ class DepressionCorpus(torch.utils.data.Dataset):
         if images:
             images = torch.stack(images)
         else:
-            images = torch.zeros_like(captions_tensors["attention_mask"])
+            images = torch.tensor([])
+            # images = torch.zeros_like(captions_tensors["attention_mask"])
 
         return (captions_tensors, images, timestamps, score)
+    
+    def getitem_sil(self, i):
+        post = self.dataset[i]
+        caption, image_path, date, username, label = post
+        label = self.get_score(label)
+        img = None
+        captions_tensors = self.tokenizer(
+            caption,
+            add_special_tokens=True,
+            max_length=512,
+            padding="max_length",
+            return_tensors="pt",
+            return_attention_mask=True,
+            truncation=True,
+        )
+        captions_tensors["attention_mask"] = captions_tensors["attention_mask"].float()
+        img = None
+        if not pd.isna(image_path) and self.use_visual:
+            img_path = settings.PATH_TO_INSTAGRAM_DATA / image_path
+            image = Image.open(img_path)
+            img = image.copy()
+            image.close()
+            if not self.get_raw_data:
+                img = self.transform(img)
+
+        if self.get_raw_data:
+            return (caption, img, username, date, label)
+        
+        if img is None:
+            img = torch.tensor([])
+            # img = torch.zeros_like(captions_tensors["attention_mask"])
+
+        return (captions_tensors["input_ids"], captions_tensors["attention_mask"], img, label)
+
+    
+    def __getitem__(self, i):
+        if self.mil:
+            return self.getitem_mil(i)
+        return self.getitem_sil(i)
 
 
 def get_input_ids_attn_mask(
@@ -321,7 +366,7 @@ def get_input_ids_attn_mask(
 # data is a list containing the batch examples, where each element is an example.
 #  data[i] is a list with size 3, where index 0 is the textual data, index 1 is
 #  visual data, and index 2 is the label
-def collate_fn(data: Tuple):
+def collate_fn_mil(data: Tuple):
     x = 0
     labels = torch.zeros(len(data), device=data[0][1].device, dtype=torch.long)
     batch_input_ids = []
@@ -346,8 +391,11 @@ def collate_fn(data: Tuple):
         input_ids_pad = []
         attn_mask_pad = []
 
-        vis_padding = torch.zeros(size=[fill, *visual_data.size()[1:]])
-        batch_visual_data.append(torch.cat([visual_data, vis_padding], 0))
+        if len(visual_data) != 0:
+            vis_padding = torch.zeros(size=[fill, *visual_data.size()[1:]])
+            batch_visual_data.append(torch.cat([visual_data, vis_padding], 0))
+        else:
+            batch_visual_data.append(torch.tensor([]))
         batch_post_attn_mask.append(posts_mask)
 
         input_ids_pad.append(input_ids)
@@ -381,14 +429,22 @@ def collate_fn(data: Tuple):
         labels,
     )
 
-
-def get_dataset(
-    dataset: Literal["DeprUFF", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"], 
+def get_mil_dataset(
+    dataset: Literal["instagram", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"], 
     period: Literal[60, 212, 365, -1],
     split: Literal["train", "val", "test"]
 ) -> List[User]:
     data = utils.load_dataframes(dataset, period, split)
     data = utils.get_users_info(utils.sort_by_date(data))
+    return data
+
+def get_sil_dataset(
+    dataset: Literal["instagram", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"], 
+    period: Literal[60, 212, 365, -1],
+    split: Literal["train", "val", "test"]
+) -> List[Post]:
+    data = utils.load_dataframes(dataset, period, split)
+    data = utils.get_posts_info(data)
     return data
 
 
@@ -400,12 +456,14 @@ def get_dataloaders(
     tokenizer: PreTrainedTokenizer = None,
     regression: bool = False,
     augment_data: bool = False,
-    dataset: Literal["DeprUFF", "DepressBR"] = "DeprUFF",
+    dataset: Literal["instagram", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"] = "instagram",
     shuffle_posts: bool = False,
+    mil: bool = True,
+    use_visual: bool = False
 ):
-    available_datasets = ["DeprUFF", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"]
-    if dataset not in available_datasets:
-        raise ValueError(f"Dataset is not one of the following: {available_datasets}")
+    # available_datasets = ["instagram", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"]
+    # if dataset not in available_datasets:
+    #     raise ValueError(f"Dataset is not one of the following: {available_datasets}")
     if tokenizer is None:
         tokenizer = AutoTokenizer.from_pretrained(settings.LANGUAGE_MODEL)
 
@@ -415,9 +473,9 @@ def get_dataloaders(
         test = DepressBR("test", tokenizer, data_augmentation=augment_data)
         collate = depressbr_collate_fn
     else:
-        train = DepressionCorpus(dataset, period, "train", tokenizer, regression, data_augmentation=augment_data, shuffle_posts=shuffle_posts)
-        val = DepressionCorpus(dataset, period, "val", tokenizer, regression, data_augmentation=augment_data)
-        test = DepressionCorpus(dataset, period, "test", tokenizer, regression, data_augmentation=augment_data)
+        train = DepressionCorpus(dataset, period, "train", tokenizer, regression, data_augmentation=augment_data, shuffle_posts=shuffle_posts, mil=mil, use_visual=use_visual)
+        val = DepressionCorpus(dataset, period, "val", tokenizer, regression, data_augmentation=augment_data, mil=mil, use_visual=use_visual)
+        test = DepressionCorpus(dataset, period, "test", tokenizer, regression, data_augmentation=augment_data, mil=mil, use_visual=use_visual)
         collate = collate_fn
 
     train_loader = DataLoader(
