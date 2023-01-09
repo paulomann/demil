@@ -136,3 +136,11 @@ lightning_logs
 wandb
 scripts/demil
 models
+
+
+# virtualenv
+venv_fl/
+
+
+# screen logs
+screen*

@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 import numpy as np
 from transformers import AutoModel, AutoTokenizer, AdamW, get_linear_schedule_with_warmup
+from torch.optim import SGD
 from demil import settings
 from torchvision import models
 from torchvision.models.resnet import ResNet
@@ -15,6 +16,33 @@ import random
 from demil.transformer import BertMIL
 from demil.utils import get_bert_config
 from einops import reduce, rearrange
+from multilingual_clip.pt_multilingual_clip import MultilingualCLIP
+import open_clip
+
+class TextMCLIP(MultilingualCLIP):
+
+    def __init__(self, config, *args, **kwargs):
+        super().__init__(config, *args, **kwargs)
+    
+    def _forward(self, input_ids, attn_mask):
+        # embs = self.transformer(input_ids, attn_mask)[0]
+        # embs = (embs * attn_mask.unsqueeze(2)).sum(dim=1) / attn_mask.sum(dim=1)[:, None]
+        # Or I can simply do this: 
+        embs = self.transformer(input_ids, attn_mask)[1] # --> pooler_output (clf token)
+        return self.LinearTransformation(embs)
+
+    def __call__(self, input_ids, attn_mask):
+        return (self._forward(input_ids, attn_mask),)
+
+class VisualMCLIP(nn.Module):
+
+    def __init__(self, multimodal_model: str):
+        super(VisualMCLIP, self).__init__()
+        self.visual_encoder = open_clip.create_model(settings.HUGGINGFACE_CLIP_TO_VISUAL[multimodal_model])
+    
+    def __call__(self, imgs):
+        return self.visual_encoder.encode_image(imgs)
+
 
 
 def avg_pool(data, input_lens: torch.BoolTensor = None):
@@ -326,196 +354,117 @@ class Seq2SeqLSTM(nn.Module):
 
         return torch.cat(out), None
 
-
-class MMIL(pl.LightningModule):
+# Multimodal Single instance learning
+class MSIL(pl.LightningModule):
     def __init__(
         self,
-        d_model: int = 126,
-        nhead: int = 2,
-        num_encoder_layers: int = 1,
-        num_decoder_layers: int = 1,
-        ignore_pad: bool = False,
         scheduler_args: Dict[str, int] = None,
         optimizer_args: Dict[str, int] = None,
-        use_mask: bool = False,
         vis_model: str = settings.VISUAL_MODEL,
         language_model: str = settings.LANGUAGE_MODEL,
-        rnn_type: Literal["transformer", "lstm"] = "transformer",
-        attention: bool = False,
-        weight: bool = False,
-        teacher_force: float = 0.0,
         text: bool = True,
         visual: bool = True,
-        pos_embedding: str = "absolute",
-        timestamp: bool = False,
+        d_model: int = 512,
+        weight: bool = False,
+        multimodal_model: str = ""
     ):
         super().__init__()
         self.scheduler_args = scheduler_args
         self.optimizer_args = optimizer_args
-        self.ignore_pad = ignore_pad
-        self.d_model = d_model
-        self.weight = weight
-        self.rnn_type = rnn_type
-        self.text_encoder = AutoModel.from_pretrained(language_model)
-        self.visual_encoder = getattr(models, vis_model)(pretrained=True)
-        self.visual_encoder.fc = nn.Identity()
         self.dropout = nn.Dropout(0.2)
-        self.text_proj = nn.Linear(self.text_encoder.pooler.dense.out_features, d_model)
-        self.vis_proj = nn.Linear(512, d_model)
-        self.classifier = nn.Linear(d_model, 2)
-        self.vis_norm = nn.LayerNorm(512)
-        self.txt_norm = nn.LayerNorm(self.text_encoder.pooler.dense.out_features)
+        self.d_model = d_model
+        self.classifier = nn.Linear(self.d_model, 2)
         self.relu = nn.ReLU()
-        self.mask = None
-        self.use_mask = use_mask
         self.text = text
         self.visual = visual
-        self.use_timestamp = timestamp
+        self.weight = weight
+        self.multimodal_model = multimodal_model
 
-        if rnn_type == "transformer":
-
-            if not (text and visual):
-                raise ValueError(
-                    "With seq2seq models we need to set --text and --visual modalities together."
-                )
-
-            self.rnn = nn.Transformer(
-                d_model=d_model,
-                nhead=nhead,
-                num_encoder_layers=num_encoder_layers,
-                num_decoder_layers=num_decoder_layers,
-            )
-        elif rnn_type == "seq2seq":
-            if not (text and visual):
-                raise ValueError(
-                    "With seq2seq models we need to set --text and --visual modalities together."
-                )
-
-            self.rnn = Seq2SeqLSTM(
-                d_model,
-                d_model,
-                d_model,
-                ignore_pad=self.ignore_pad,
-                enc_n_layers=num_encoder_layers,
-                dec_n_layers=num_decoder_layers,
-                use_attention=attention,
-                teacher_force=teacher_force,
-            )
-        elif rnn_type == "lstm":
-            self.rnn = LSTM(d_model, d_model, n_layers=1, ignore_pad=self.ignore_pad)
-        elif rnn_type == "bert":
-            bert_config = get_bert_config()
-            bert_config.hidden_size = d_model
-            bert_config.num_attention_heads = nhead
-            bert_config.num_hidden_layers = num_encoder_layers
-            bert_config.position_embedding_type = pos_embedding
-            self.rnn = BertMIL(bert_config)
-        elif rnn_type == "mean":
-            self.rnn = MeanMIL(d_model)
-        else:
-
-            raise NotImplementedError(f"The rnn type {self.rnn_type} is not implemented")
+        self.text_encoder, self.visual_encoder = self.init_encoders(
+            self.text, self.visual, vis_model, language_model, self.multimodal_model
+        )
+        self.txt_norm, self.vis_norm = self.init_norm(
+            self.text_encoder, self.visual_encoder, self.multimodal_model
+        )
+        self.text_proj, self.vis_proj = self.init_proj(
+            self.text_encoder, self.visual_encoder, self.multimodal_model, d_model
+        )
 
         self.init_layers()
+        # self.partially_freeze_layers(
+        #     self.text_encoder,
+        #     self.visual_encoder,
+        # )
         self.freeze_layers(
             self.text_encoder,
             self.visual_encoder,
         )
         self.save_hyperparameters()
 
-    def generate_square_subsequent_mask(self, sz, device):
-        mask = (torch.triu(torch.ones(sz, sz, device=device)) == 1).transpose(0, 1)
-        mask = mask.masked_fill(mask == 0, float("-inf")).masked_fill(
-            mask == 1, float(0.0)
-        )
-        return mask
+    def init_encoders(self, text: bool, visual: bool, vis_model: str, language_model: str, multimodal_model: str):
+        visual_encder, text_encoder = None, None
+        if multimodal_model:
+            # visual_encoder = open_clip.create_model(settings.HUGGINGFACE_CLIP_TO_VISUAL[multimodal_model])
+            visual_encoder = VisualMCLIP(multimodal_model)
+            text_encoder = TextMCLIP.from_pretrained(multimodal_model)
+        else:
+            visual_encoder = getattr(models, vis_model)(pretrained=True)
+            visual_encoder.fc = nn.Identity()
+            text_encoder = AutoModel.from_pretrained(language_model)
+        
+        return (text_encoder, visual_encoder)
+
+    def init_norm(self, text_encoder, visual_encoder, multimodal_model):
+        if multimodal_model:
+            txt_norm = nn.LayerNorm(text_encoder.LinearTransformation.out_features)
+            vis_norm = nn.LayerNorm(self.text_encoder.LinearTransformation.out_features)
+        else:
+            txt_norm = nn.LayerNorm(text_encoder.pooler.dense.out_features)
+            vis_norm = nn.LayerNorm(512)
+
+        return (txt_norm, vis_norm)
+
+    def init_proj(self, text_encoder, visual_encoder, multimodal_model, d_model):
+        if multimodal_model:
+            text_proj = nn.Linear(self.text_encoder.LinearTransformation.out_features, d_model)
+            vis_proj = nn.Linear(self.text_encoder.LinearTransformation.out_features, d_model)
+        else:
+            text_proj = nn.Linear(self.text_encoder.pooler.dense.out_features, d_model)
+            vis_proj = nn.Linear(512, d_model)
+
+        return (text_proj, vis_proj)
 
     def forward(self, batch):
-        src, tgt, key_padd_mask, timestamps, labels = batch
+        input_ids, attn_mask, imgs, _, labels = batch
+        attn_weights = None
 
         textual_ftrs = 1
         visual_ftrs = 1
         if self.text:
 
-            textual_ftrs = [
-                self.text_encoder(input_ids, attn_mask)[-1]
-                for input_ids, attn_mask in zip(src[0], src[1])
-            ]
-            textual_ftrs = torch.stack(textual_ftrs) * math.sqrt(self.d_model)
-            textual_ftrs = self.dropout(
-                self.text_proj(self.txt_norm(textual_ftrs).transpose(0, 1))
-            )
+            textual_ftrs = self.text_encoder(input_ids.squeeze(1), attn_mask.squeeze(1))[-1]
+            textual_ftrs = self.dropout(self.text_proj(self.txt_norm(textual_ftrs)))
 
         if self.visual:
 
-            visual_ftrs = [self.visual_encoder(user_imgs_seq) for user_imgs_seq in tgt]
-            visual_ftrs = torch.stack(visual_ftrs) * math.sqrt(
-                self.d_model
-            )  # [BATCH, SEQ, EMB]
-            visual_ftrs = self.dropout(
-                self.vis_proj(self.vis_norm(visual_ftrs).transpose(0, 1))
-            )  # [SEQ, BATCH, EMB]
+            visual_ftrs = self.visual_encoder(imgs)
+            visual_ftrs = self.dropout(self.vis_proj(self.vis_norm(visual_ftrs)))
 
-        if not self.ignore_pad:
-            key_padd_mask = None
+        x = textual_ftrs * visual_ftrs
 
-        if self.mask is None and self.use_mask:
-            self.mask = self.generate_square_subsequent_mask(
-                visual_ftrs.size(0), visual_ftrs.device
-            )
-
-        if self.rnn_type == "transformer":
-
-            hidden = self.rnn(
-                self.pos_encoder(textual_ftrs),
-                self.pos_encoder(visual_ftrs),
-                src_mask=self.mask,
-                tgt_mask=self.mask,
-                src_key_padding_mask=key_padd_mask,
-                tgt_key_padding_mask=key_padd_mask,
-                memory_key_padding_mask=key_padd_mask,
-            ).transpose(0, 1)
-
-            pooled_out = avg_pool(hidden, key_padd_mask)
-            attn_weights = None
-
-        elif self.rnn_type == "lstm":
-
-            input_lengths = (
-                key_padd_mask.shape[1] - key_padd_mask.sum(dim=1)
-                if self.ignore_pad
-                else None
-            )
-
-            x = textual_ftrs * visual_ftrs
-            pooled_out, attn_weights = self.rnn(x, input_lengths)
-
-        elif self.rnn_type == "bert":
-
-            x = (textual_ftrs * visual_ftrs).transpose(0, 1)
-            mask = 1 - key_padd_mask.type(x.dtype)
-            if self.use_timestamp:
-                pooled_out, attn_weights = self.rnn(
-                    x, attention_mask=mask, timestamps=timestamps
-                )
-            else:
-                pooled_out, attn_weights = self.rnn(x, attention_mask=mask)
-        elif self.rnn_type == "mean":
-            x = (textual_ftrs * visual_ftrs).transpose(0, 1)
-            attn_weights = None
-            pooled_out = self.rnn(x)
-        else:
-            raise NotImplementedError(f"The rnn type {self.rnn_type} is not implemented")
-
-        logits = self.classifier(pooled_out)
+        logits = self.classifier(x)
 
         return logits, attn_weights
 
     def configure_optimizers(self):
         print(f"Optimizer args: {self.optimizer_args}")
         optimizer = AdamW(self.parameters(), **self.optimizer_args)
-        scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
-        return [optimizer], [scheduler]
+
+        if self.scheduler_args:
+            scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
+            return [optimizer], [scheduler]
+        
+        return optimizer
 
     def training_step(self, train_batch, batch_idx):
         *_, labels = train_batch
@@ -595,7 +544,7 @@ class MMIL(pl.LightningModule):
         self.log_dict({"val_loss": loss, "val_acc": acc})
 
     def test_step(self, test_batch, batch_idx):
-        *_, labels = test_batch
+        *_, usernames, labels = test_batch
         logits, attn_weights = self(test_batch)
         preds = F.softmax(logits, dim=-1).argmax(dim=-1)
         probas = F.softmax(logits, dim=-1)
@@ -604,21 +553,42 @@ class MMIL(pl.LightningModule):
             loss_fct = nn.CrossEntropyLoss(reduction="none")
             loss = loss_fct(logits.view(-1, 2), labels.view(-1)).cpu()
 
-        # attn_weights = attn_weights.cpu().squeeze() if attn_weights is not None else None
         labels = labels.cpu().tolist()
         probas = probas.cpu().tolist()
         preds = preds.cpu().tolist()
+        loss = loss.cpu().tolist()
         # return (labels, probas, preds, attn_weights, loss, inpt)
-        return (labels, probas, preds)
+        return (labels, probas, preds, loss, usernames)
 
     def test_epoch_end(self, outputs):
         labels = []
         probas = []
         preds = []
+        loss = []
+        usernames = []
         for i in outputs:
             labels.extend(i[0])
             probas.extend(i[1])
             preds.extend(i[2])
+            loss.extend(i[3])
+            usernames.extend(i[4])
+
+        new_labels = []
+        new_preds = []
+        new_probas = []
+
+        uniq_usernames = set(usernames)
+        for name in uniq_usernames:
+            indices = [i for i, x in enumerate(usernames) if x == name]
+            new_labels.append(labels[indices[0]])
+            user_probas = [probas[idx][0] for idx in indices]
+            proba = sum(user_probas)/len(user_probas)
+            new_preds.append(int(proba > 0.5))
+            new_probas.append([1-proba, proba])
+
+        preds = new_preds
+        labels = new_labels
+        probas = new_probas
 
         print()
         print(f"===>TEST PREDS: {preds}")
@@ -639,16 +609,250 @@ class MMIL(pl.LightningModule):
                 )
             }
         )
-        precision, recall, fscore, _ = precision_recall_fscore_support(
-            labels, preds, average="binary"
-        )
-        self.log_dict({"precision": precision, "recall": recall, "fscore": fscore})
+        precision, recall, fscore, _ = precision_recall_fscore_support(labels, preds, average="binary")
+        self.log_dict({"precision": precision, "recall": recall, "fscore": fscore, "test_loss": sum(loss)/len(loss)})
+        print(f"Precision: {precision}\nRecall: {recall}\nFscore: {fscore}")
 
     def init_layers(self):
         init_weights(
             self.text_proj, self.vis_proj, self.classifier, self.vis_norm, self.txt_norm
         )
 
+    def partially_freeze_layers(self, text_encoder: AutoModel, vis_encoder: ResNet):
+        ct = 0
+        for child in vis_encoder.children():
+            ct += 1
+            if ct < 7:
+                for param in child.parameters():
+                    param.requires_grad = False
+
+        for child in text_encoder.embeddings.children():
+            for param in child.parameters():
+                param.requires_grad = False
+
+        ct = 0
+        for child in text_encoder.encoder.layer.children():
+            ct +=1 
+            if ct < 7:
+                for param in child.parameters():
+                    param.requires_grad = False
+
+    def freeze_layers(self, text_encoder, vis_encoder):
+        for child in vis_encoder.children():
+            for param in child.parameters():
+                param.requires_grad = False
+
+        # textual
+        for name, param in text_encoder.named_parameters():
+            param.requires_grad = False
+
+        if hasattr(text_encoder, "pooler"):
+            for name, param in text_encoder.pooler.named_parameters():
+                param.requires_grad = True
+
+        elif self.multimodal_model == "M-CLIP/XLM-Roberta-Large-Vit-B-16Plus":
+            for name, param in text_encoder.LinearTransformation.named_parameters():
+                param.requires_grad = True
+
+
+class MMIL(MSIL):
+    def __init__(
+        self,
+        nhead: int = 2,
+        num_encoder_layers: int = 1,
+        num_decoder_layers: int = 1,
+        ignore_pad: bool = False,
+        use_mask: bool = False,
+        rnn_type: Literal["transformer", "lstm"] = "transformer",
+        attention: bool = False,
+        teacher_force: float = 0.0,
+        pos_embedding: str = "absolute",
+        timestamp: bool = False,
+        *args,
+        **kwargs,
+    ):
+        super(MMIL, self).__init__(*args, **kwargs)
+        self.ignore_pad = ignore_pad
+        self.rnn_type = rnn_type
+        self.mask = None
+        self.use_mask = use_mask
+        self.use_timestamp = timestamp
+        
+        if rnn_type == "transformer":
+
+            if not (text and visual):
+                raise ValueError(
+                    "With seq2seq models we need to set --text and --visual modalities together."
+                )
+
+            self.rnn = nn.Transformer(
+                d_model=self.d_model,
+                nhead=nhead,
+                num_encoder_layers=num_encoder_layers,
+                num_decoder_layers=num_decoder_layers,
+            )
+        elif rnn_type == "seq2seq":
+            if not (text and visual):
+                raise ValueError(
+                    "With seq2seq models we need to set --text and --visual modalities together."
+                )
+
+            self.rnn = Seq2SeqLSTM(
+                self.d_model,
+                self.d_model,
+                self.d_model,
+                ignore_pad=self.ignore_pad,
+                enc_n_layers=num_encoder_layers,
+                dec_n_layers=num_decoder_layers,
+                use_attention=attention,
+                teacher_force=teacher_force,
+            )
+        elif rnn_type == "lstm":
+            self.rnn = LSTM(self.d_model, self.d_model, n_layers=1, ignore_pad=self.ignore_pad)
+        elif rnn_type == "bert":
+            bert_config = get_bert_config()
+            bert_config.hidden_size = self.d_model
+            bert_config.num_attention_heads = nhead
+            bert_config.num_hidden_layers = num_encoder_layers
+            bert_config.position_embedding_type = pos_embedding
+            self.rnn = BertMIL(bert_config)
+        elif rnn_type == "mean":
+            self.rnn = MeanMIL(self.d_model)
+        else:
+
+            raise NotImplementedError(f"The rnn type {self.rnn_type} is not implemented")
+
+        self.init_rnn_layers()
+
+    def generate_square_subsequent_mask(self, sz, device):
+        mask = (torch.triu(torch.ones(sz, sz, device=device)) == 1).transpose(0, 1)
+        mask = mask.masked_fill(mask == 0, float("-inf")).masked_fill(
+            mask == 1, float(0.0)
+        )
+        return mask
+
+    def forward(self, batch):
+        src, tgt, key_padd_mask, timestamps, labels = batch
+
+        textual_ftrs = 1
+        visual_ftrs = 1
+        if self.text:
+
+            textual_ftrs = [
+                self.text_encoder(input_ids, attn_mask)[-1]
+                for input_ids, attn_mask in zip(src[0], src[1])
+            ]
+            textual_ftrs = torch.stack(textual_ftrs) * math.sqrt(self.d_model)
+            textual_ftrs = self.dropout(
+                self.text_proj(self.txt_norm(textual_ftrs).transpose(0, 1))
+            )
+
+        if self.visual:
+
+            visual_ftrs = [self.visual_encoder(user_imgs_seq) for user_imgs_seq in tgt]
+            visual_ftrs = torch.stack(visual_ftrs) * math.sqrt(
+                self.d_model
+            )  # [BATCH, SEQ, EMB]
+            visual_ftrs = self.dropout(
+                self.vis_proj(self.vis_norm(visual_ftrs).transpose(0, 1))
+            )  # [SEQ, BATCH, EMB]
+
+        if not self.ignore_pad:
+            key_padd_mask = None
+
+        if self.mask is None and self.use_mask:
+            self.mask = self.generate_square_subsequent_mask(
+                visual_ftrs.size(0), visual_ftrs.device
+            )
+
+        if self.rnn_type == "transformer":
+
+            hidden = self.rnn(
+                self.pos_encoder(textual_ftrs),
+                self.pos_encoder(visual_ftrs),
+                src_mask=self.mask,
+                tgt_mask=self.mask,
+                src_key_padding_mask=key_padd_mask,
+                tgt_key_padding_mask=key_padd_mask,
+                memory_key_padding_mask=key_padd_mask,
+            ).transpose(0, 1)
+
+            pooled_out = avg_pool(hidden, key_padd_mask)
+            attn_weights = None
+
+        elif self.rnn_type == "lstm":
+
+            input_lengths = (
+                key_padd_mask.shape[1] - key_padd_mask.sum(dim=1)
+                if self.ignore_pad
+                else None
+            )
+
+            x = textual_ftrs * visual_ftrs
+            pooled_out, attn_weights = self.rnn(x, input_lengths.to("cpu"))
+
+        elif self.rnn_type == "bert":
+
+            x = (textual_ftrs * visual_ftrs).transpose(0, 1)
+            mask = 1 - key_padd_mask.type(x.dtype)
+            if self.use_timestamp:
+                pooled_out, attn_weights = self.rnn(
+                    x, attention_mask=mask, timestamps=timestamps
+                )
+            else:
+                pooled_out, attn_weights = self.rnn(x, attention_mask=mask)
+        elif self.rnn_type == "mean":
+            x = (textual_ftrs * visual_ftrs).transpose(0, 1)
+            attn_weights = None
+            pooled_out = self.rnn(x)
+        else:
+            raise NotImplementedError(f"The rnn type {self.rnn_type} is not implemented")
+
+        logits = self.classifier(pooled_out)
+
+        return logits, attn_weights
+
+    def test_step(self, test_batch, batch_idx):
+        *_, labels = test_batch
+        logits, attn_weights = self(test_batch)
+        preds = F.softmax(logits, dim=-1).argmax(dim=-1)
+        probas = F.softmax(logits, dim=-1)
+
+        if labels is not None:
+            loss_fct = nn.CrossEntropyLoss(reduction="none")
+            loss = loss_fct(logits.view(-1, 2), labels.view(-1)).cpu()
+
+        # attn_weights = attn_weights.cpu().squeeze() if attn_weights is not None else None
+        labels = labels.cpu().tolist()
+        probas = probas.cpu().tolist()
+        preds = preds.cpu().tolist()
+        loss = loss.cpu().tolist()
+        # return (labels, probas, preds, attn_weights, loss, inpt)
+        return (labels, probas, preds, loss)
+
+    def test_epoch_end(self, outputs):
+        labels = []
+        probas = []
+        preds = []
+        loss = []
+        for i in outputs:
+            labels.extend(i[0])
+            probas.extend(i[1])
+            preds.extend(i[2])
+            loss.extend(i[3])
+
+        print()
+        print(f"===>TEST PREDS: {preds}")
+        print(f"===>TEST LABEL: {labels}")
+        print()
+
+        precision, recall, fscore, _ = precision_recall_fscore_support(
+            labels, preds, average="binary"
+        )
+        self.log_dict({"precision": precision, "recall": recall, "fscore": fscore, "test_loss": sum(loss)/len(loss)})
+        print(f"Precision: {precision}\nRecall: {recall}\nFscore: {fscore}")
+
+    def init_rnn_layers(self):
         if self.rnn_type == "transformer":
             for name, param in self.rnn.named_parameters():
                 if "weight" in name:
@@ -658,25 +862,3 @@ class MMIL(pl.LightningModule):
                     nn.init.constant_(param.data, 0.0)
         elif self.rnn_type == "lstm":
             init_weights(self.rnn)
-# for name, param in lstm.named_parameters():
-#   if 'bias' in name:
-#      nn.init.constant(param, 0.0)
-#   elif 'weight' in name:
-#      nn.init.xavier_normal(param)
-        else:
-            pass
-
-    def freeze_layers(self, text_encoder: AutoModel, vis_encoder: ResNet):
-        for child in vis_encoder.children():
-            for param in child.parameters():
-                param.requires_grad = False
-
-        # textual
-        for name, param in text_encoder.named_parameters():
-            param.requires_grad = False
-
-        for name, param in text_encoder.pooler.named_parameters():
-            param.requires_grad = True
-
-        # Here we freeze all layers except the topmost layer.
-        # for both textual and visual encoders

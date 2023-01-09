@@ -9,11 +9,11 @@ encoding = "utf-8"
 verbose = False
 
 DATA_PATH = Path(ROOT, "data")
-DEPRESSION_CORPUS = Path(DATA_PATH, "depression_corpus")
+DEPRESSION_CORPUS = Path(DATA_PATH, "instagram")
 AVEC_AUDIO = Path(DATA_PATH, "avec2019", "audio_deep_features")
 AVEC_VIDEO = Path(DATA_PATH, "avec2019", "video_CNNs")
 AVEC_METADATA = Path(DATA_PATH, "avec2019", "metadata.csv")
-PATH_TO_INSTAGRAM_DATA = Path(DATA_PATH, "instagram")
+PATH_TO_INSTAGRAM_DATA = Path(DATA_PATH, "instagram_data")
 
 # ===================== LOSADA =====================
 
@@ -42,6 +42,12 @@ ENGLISH_BERT = [
     "bert-base-uncased"
 ]
 XLM = ["xlm-roberta-base", "xlm-roberta-large"]
+
+CLIP = ["M-CLIP/XLM-Roberta-Large-Vit-B-16Plus"]
+
+HUGGINGFACE_CLIP_TO_VISUAL = {
+    "M-CLIP/XLM-Roberta-Large-Vit-B-16Plus": "ViT-B-16-plus-240"
+}
 
 
 # ============= Create necessary folders =============
