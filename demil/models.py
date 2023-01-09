@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 import numpy as np
 from transformers import AutoModel, AutoTokenizer, AdamW, get_linear_schedule_with_warmup
+from torch.optim import SGD
 from demil import settings
 from torchvision import models
 from torchvision.models.resnet import ResNet
@@ -15,6 +16,33 @@ import random
 from demil.transformer import BertMIL
 from demil.utils import get_bert_config
 from einops import reduce, rearrange
+from multilingual_clip.pt_multilingual_clip import MultilingualCLIP
+import open_clip
+
+class TextMCLIP(MultilingualCLIP):
+
+    def __init__(self, config, *args, **kwargs):
+        super().__init__(config, *args, **kwargs)
+    
+    def _forward(self, input_ids, attn_mask):
+        # embs = self.transformer(input_ids, attn_mask)[0]
+        # embs = (embs * attn_mask.unsqueeze(2)).sum(dim=1) / attn_mask.sum(dim=1)[:, None]
+        # Or I can simply do this: 
+        embs = self.transformer(input_ids, attn_mask)[1] # --> pooler_output (clf token)
+        return self.LinearTransformation(embs)
+
+    def __call__(self, input_ids, attn_mask):
+        return (self._forward(input_ids, attn_mask),)
+
+class VisualMCLIP(nn.Module):
+
+    def __init__(self, multimodal_model: str):
+        super(VisualMCLIP, self).__init__()
+        self.visual_encoder = open_clip.create_model(settings.HUGGINGFACE_CLIP_TO_VISUAL[multimodal_model])
+    
+    def __call__(self, imgs):
+        return self.visual_encoder.encode_image(imgs)
+
 
 
 def avg_pool(data, input_lens: torch.BoolTensor = None):
@@ -326,52 +354,330 @@ class Seq2SeqLSTM(nn.Module):
 
         return torch.cat(out), None
 
-
-class MMIL(pl.LightningModule):
+# Multimodal Single instance learning
+class MSIL(pl.LightningModule):
     def __init__(
         self,
-        d_model: int = 126,
-        nhead: int = 2,
-        num_encoder_layers: int = 1,
-        num_decoder_layers: int = 1,
-        ignore_pad: bool = False,
         scheduler_args: Dict[str, int] = None,
         optimizer_args: Dict[str, int] = None,
-        use_mask: bool = False,
         vis_model: str = settings.VISUAL_MODEL,
         language_model: str = settings.LANGUAGE_MODEL,
-        rnn_type: Literal["transformer", "lstm"] = "transformer",
-        attention: bool = False,
-        weight: bool = False,
-        teacher_force: float = 0.0,
         text: bool = True,
         visual: bool = True,
-        pos_embedding: str = "absolute",
-        timestamp: bool = False,
+        d_model: int = 512,
+        weight: bool = False,
+        multimodal_model: str = ""
     ):
         super().__init__()
         self.scheduler_args = scheduler_args
         self.optimizer_args = optimizer_args
-        self.ignore_pad = ignore_pad
-        self.d_model = d_model
-        self.weight = weight
-        self.rnn_type = rnn_type
-        self.text_encoder = AutoModel.from_pretrained(language_model)
-        self.visual_encoder = getattr(models, vis_model)(pretrained=True)
-        self.visual_encoder.fc = nn.Identity()
         self.dropout = nn.Dropout(0.2)
-        self.text_proj = nn.Linear(self.text_encoder.pooler.dense.out_features, d_model)
-        self.vis_proj = nn.Linear(512, d_model)
-        self.classifier = nn.Linear(d_model, 2)
-        self.vis_norm = nn.LayerNorm(512)
-        self.txt_norm = nn.LayerNorm(self.text_encoder.pooler.dense.out_features)
+        self.d_model = d_model
+        self.classifier = nn.Linear(self.d_model, 2)
         self.relu = nn.ReLU()
-        self.mask = None
-        self.use_mask = use_mask
         self.text = text
         self.visual = visual
-        self.use_timestamp = timestamp
+        self.weight = weight
+        self.multimodal_model = multimodal_model
 
+        self.text_encoder, self.visual_encoder = self.init_encoders(
+            self.text, self.visual, vis_model, language_model, self.multimodal_model
+        )
+        self.txt_norm, self.vis_norm = self.init_norm(
+            self.text_encoder, self.visual_encoder, self.multimodal_model
+        )
+        self.text_proj, self.vis_proj = self.init_proj(
+            self.text_encoder, self.visual_encoder, self.multimodal_model, d_model
+        )
+
+        self.init_layers()
+        # self.partially_freeze_layers(
+        #     self.text_encoder,
+        #     self.visual_encoder,
+        # )
+        self.freeze_layers(
+            self.text_encoder,
+            self.visual_encoder,
+        )
+        self.save_hyperparameters()
+
+    def init_encoders(self, text: bool, visual: bool, vis_model: str, language_model: str, multimodal_model: str):
+        visual_encder, text_encoder = None, None
+        if multimodal_model:
+            # visual_encoder = open_clip.create_model(settings.HUGGINGFACE_CLIP_TO_VISUAL[multimodal_model])
+            visual_encoder = VisualMCLIP(multimodal_model)
+            text_encoder = TextMCLIP.from_pretrained(multimodal_model)
+        else:
+            visual_encoder = getattr(models, vis_model)(pretrained=True)
+            visual_encoder.fc = nn.Identity()
+            text_encoder = AutoModel.from_pretrained(language_model)
+        
+        return (text_encoder, visual_encoder)
+
+    def init_norm(self, text_encoder, visual_encoder, multimodal_model):
+        if multimodal_model:
+            txt_norm = nn.LayerNorm(text_encoder.LinearTransformation.out_features)
+            vis_norm = nn.LayerNorm(self.text_encoder.LinearTransformation.out_features)
+        else:
+            txt_norm = nn.LayerNorm(text_encoder.pooler.dense.out_features)
+            vis_norm = nn.LayerNorm(512)
+
+        return (txt_norm, vis_norm)
+
+    def init_proj(self, text_encoder, visual_encoder, multimodal_model, d_model):
+        if multimodal_model:
+            text_proj = nn.Linear(self.text_encoder.LinearTransformation.out_features, d_model)
+            vis_proj = nn.Linear(self.text_encoder.LinearTransformation.out_features, d_model)
+        else:
+            text_proj = nn.Linear(self.text_encoder.pooler.dense.out_features, d_model)
+            vis_proj = nn.Linear(512, d_model)
+
+        return (text_proj, vis_proj)
+
+    def forward(self, batch):
+        input_ids, attn_mask, imgs, _, labels = batch
+        attn_weights = None
+
+        textual_ftrs = 1
+        visual_ftrs = 1
+        if self.text:
+
+            textual_ftrs = self.text_encoder(input_ids.squeeze(1), attn_mask.squeeze(1))[-1]
+            textual_ftrs = self.dropout(self.text_proj(self.txt_norm(textual_ftrs)))
+
+        if self.visual:
+
+            visual_ftrs = self.visual_encoder(imgs)
+            visual_ftrs = self.dropout(self.vis_proj(self.vis_norm(visual_ftrs)))
+
+        x = textual_ftrs * visual_ftrs
+
+        logits = self.classifier(x)
+
+        return logits, attn_weights
+
+    def configure_optimizers(self):
+        print(f"Optimizer args: {self.optimizer_args}")
+        optimizer = AdamW(self.parameters(), **self.optimizer_args)
+
+        if self.scheduler_args:
+            scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
+            return [optimizer], [scheduler]
+        
+        return optimizer
+
+    def training_step(self, train_batch, batch_idx):
+        *_, labels = train_batch
+        logits, _ = self(train_batch)
+        if labels is not None:
+            if self.weight:
+                w = torch.tensor([1.47, 1], dtype=logits.dtype, device=logits.device)
+                loss_fct = nn.CrossEntropyLoss(weight=w)
+            else:
+                loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(logits.view(-1, 2), labels.view(-1))
+
+        with torch.no_grad():
+            preds = F.softmax(logits, dim=-1).argmax(dim=-1)
+            acc = ((preds == labels).sum().float()) / len(labels)
+            print()
+            print(f"===>TRAIN PREDS: {preds}")
+            print(f"===>TRAIN LABEL: {labels}")
+            print(f"===>TRAIN ACCUR: {acc}")
+            print()
+
+        preds = preds.unsqueeze(0) if preds.dim() == 0 else preds
+        return {"loss": loss, "preds": preds, "targets": labels}
+
+    def training_epoch_end(self, outs):
+        preds = []
+        targets = []
+        losses = []
+        for out in outs:
+            losses.append(out["loss"] * len(out["targets"]))
+            targets.append(out["targets"])
+            preds.append(out["preds"])
+
+        preds = torch.cat(preds)
+        targets = torch.cat(targets)
+        loss = sum(losses) / len(targets)
+        acc = ((preds == targets).sum().float()) / len(targets)
+        print()
+        print(f"===>TRAIN BATCH ACCUR: {acc}")
+        print()
+        self.log_dict({"train_loss": loss, "train_acc": acc})
+
+    def validation_step(self, val_batch, batch_idx):
+        *_, labels = val_batch
+        logits, _ = self(val_batch)
+        if labels is not None:
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(logits.view(-1, 2), labels.view(-1))
+
+        preds = F.softmax(logits, dim=-1).argmax(dim=-1)
+        acc = ((preds == labels).sum().float()) / len(labels)
+        print()
+        print(f"===>VAL PREDS: {preds}")
+        print(f"===>VAL LABEL: {labels}")
+        print(f"===>VAL ACCUR: {acc}")
+        print()
+
+        preds = preds.unsqueeze(0) if preds.dim() == 0 else preds
+        return {"val_loss": loss, "preds": preds, "targets": labels}
+
+    def validation_epoch_end(self, outs):
+        preds = []
+        targets = []
+        losses = []
+        for out in outs:
+            losses.append(out["val_loss"] * len(out["targets"]))
+            targets.append(out["targets"])
+            preds.append(out["preds"])
+
+        preds = torch.cat(preds)
+        targets = torch.cat(targets)
+        loss = sum(losses) / len(targets)
+        acc = ((preds == targets).sum().float()) / len(targets)
+        print()
+        print(f"===>VAL BATCH ACCUR: {acc}")
+        print()
+        self.log_dict({"val_loss": loss, "val_acc": acc})
+
+    def test_step(self, test_batch, batch_idx):
+        *_, usernames, labels = test_batch
+        logits, attn_weights = self(test_batch)
+        preds = F.softmax(logits, dim=-1).argmax(dim=-1)
+        probas = F.softmax(logits, dim=-1)
+
+        if labels is not None:
+            loss_fct = nn.CrossEntropyLoss(reduction="none")
+            loss = loss_fct(logits.view(-1, 2), labels.view(-1)).cpu()
+
+        labels = labels.cpu().tolist()
+        probas = probas.cpu().tolist()
+        preds = preds.cpu().tolist()
+        loss = loss.cpu().tolist()
+        # return (labels, probas, preds, attn_weights, loss, inpt)
+        return (labels, probas, preds, loss, usernames)
+
+    def test_epoch_end(self, outputs):
+        labels = []
+        probas = []
+        preds = []
+        loss = []
+        usernames = []
+        for i in outputs:
+            labels.extend(i[0])
+            probas.extend(i[1])
+            preds.extend(i[2])
+            loss.extend(i[3])
+            usernames.extend(i[4])
+
+        new_labels = []
+        new_preds = []
+        new_probas = []
+
+        uniq_usernames = set(usernames)
+        for name in uniq_usernames:
+            indices = [i for i, x in enumerate(usernames) if x == name]
+            new_labels.append(labels[indices[0]])
+            user_probas = [probas[idx][0] for idx in indices]
+            proba = sum(user_probas)/len(user_probas)
+            new_preds.append(int(proba > 0.5))
+            new_probas.append([1-proba, proba])
+
+        preds = new_preds
+        labels = new_labels
+        probas = new_probas
+
+        print()
+        print(f"===>TEST PREDS: {preds}")
+        print(f"===>TEST LABEL: {labels}")
+        print()
+
+        self.logger.experiment.log(
+            {
+                "roc": wandb.plots.ROC(
+                    np.array(labels), np.array(probas), ["Not Depressed", "Depressed"]
+                )
+            }
+        )
+        self.logger.experiment.log(
+            {
+                "cm": wandb.sklearn.plot_confusion_matrix(
+                    np.array(labels), np.array(preds), ["Not Depressed", "Depressed"]
+                )
+            }
+        )
+        precision, recall, fscore, _ = precision_recall_fscore_support(labels, preds, average="binary")
+        self.log_dict({"precision": precision, "recall": recall, "fscore": fscore, "test_loss": sum(loss)/len(loss)})
+        print(f"Precision: {precision}\nRecall: {recall}\nFscore: {fscore}")
+
+    def init_layers(self):
+        init_weights(
+            self.text_proj, self.vis_proj, self.classifier, self.vis_norm, self.txt_norm
+        )
+
+    def partially_freeze_layers(self, text_encoder: AutoModel, vis_encoder: ResNet):
+        ct = 0
+        for child in vis_encoder.children():
+            ct += 1
+            if ct < 7:
+                for param in child.parameters():
+                    param.requires_grad = False
+
+        for child in text_encoder.embeddings.children():
+            for param in child.parameters():
+                param.requires_grad = False
+
+        ct = 0
+        for child in text_encoder.encoder.layer.children():
+            ct +=1 
+            if ct < 7:
+                for param in child.parameters():
+                    param.requires_grad = False
+
+    def freeze_layers(self, text_encoder, vis_encoder):
+        for child in vis_encoder.children():
+            for param in child.parameters():
+                param.requires_grad = False
+
+        # textual
+        for name, param in text_encoder.named_parameters():
+            param.requires_grad = False
+
+        if hasattr(text_encoder, "pooler"):
+            for name, param in text_encoder.pooler.named_parameters():
+                param.requires_grad = True
+
+        elif self.multimodal_model == "M-CLIP/XLM-Roberta-Large-Vit-B-16Plus":
+            for name, param in text_encoder.LinearTransformation.named_parameters():
+                param.requires_grad = True
+
+
+class MMIL(MSIL):
+    def __init__(
+        self,
+        nhead: int = 2,
+        num_encoder_layers: int = 1,
+        num_decoder_layers: int = 1,
+        ignore_pad: bool = False,
+        use_mask: bool = False,
+        rnn_type: Literal["transformer", "lstm"] = "transformer",
+        attention: bool = False,
+        teacher_force: float = 0.0,
+        pos_embedding: str = "absolute",
+        timestamp: bool = False,
+        *args,
+        **kwargs,
+    ):
+        super(MMIL, self).__init__(*args, **kwargs)
+        self.ignore_pad = ignore_pad
+        self.rnn_type = rnn_type
+        self.mask = None
+        self.use_mask = use_mask
+        self.use_timestamp = timestamp
+        
         if rnn_type == "transformer":
 
             if not (text and visual):
@@ -380,7 +686,7 @@ class MMIL(pl.LightningModule):
                 )
 
             self.rnn = nn.Transformer(
-                d_model=d_model,
+                d_model=self.d_model,
                 nhead=nhead,
                 num_encoder_layers=num_encoder_layers,
                 num_decoder_layers=num_decoder_layers,
@@ -392,9 +698,9 @@ class MMIL(pl.LightningModule):
                 )
 
             self.rnn = Seq2SeqLSTM(
-                d_model,
-                d_model,
-                d_model,
+                self.d_model,
+                self.d_model,
+                self.d_model,
                 ignore_pad=self.ignore_pad,
                 enc_n_layers=num_encoder_layers,
                 dec_n_layers=num_decoder_layers,
@@ -402,26 +708,21 @@ class MMIL(pl.LightningModule):
                 teacher_force=teacher_force,
             )
         elif rnn_type == "lstm":
-            self.rnn = LSTM(d_model, d_model, n_layers=1, ignore_pad=self.ignore_pad)
+            self.rnn = LSTM(self.d_model, self.d_model, n_layers=1, ignore_pad=self.ignore_pad)
         elif rnn_type == "bert":
             bert_config = get_bert_config()
-            bert_config.hidden_size = d_model
+            bert_config.hidden_size = self.d_model
             bert_config.num_attention_heads = nhead
             bert_config.num_hidden_layers = num_encoder_layers
             bert_config.position_embedding_type = pos_embedding
             self.rnn = BertMIL(bert_config)
         elif rnn_type == "mean":
-            self.rnn = MeanMIL(d_model)
+            self.rnn = MeanMIL(self.d_model)
         else:
 
             raise NotImplementedError(f"The rnn type {self.rnn_type} is not implemented")
 
-        self.init_layers()
-        self.freeze_layers(
-            self.text_encoder,
-            self.visual_encoder,
-        )
-        self.save_hyperparameters()
+        self.init_rnn_layers()
 
     def generate_square_subsequent_mask(self, sz, device):
         mask = (torch.triu(torch.ones(sz, sz, device=device)) == 1).transpose(0, 1)
@@ -511,93 +812,6 @@ class MMIL(pl.LightningModule):
 
         return logits, attn_weights
 
-    def configure_optimizers(self):
-        print(f"Optimizer args: {self.optimizer_args}")
-        optimizer = AdamW(self.parameters(), **self.optimizer_args)
-        
-        if self.scheduler_args:
-            scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
-            return [optimizer], [scheduler]
-        
-        return optimizer
-
-    def training_step(self, train_batch, batch_idx):
-        *_, labels = train_batch
-        logits, _ = self(train_batch)
-        if labels is not None:
-            if self.weight:
-                w = torch.tensor([1.47, 1], dtype=logits.dtype, device=logits.device)
-                loss_fct = nn.CrossEntropyLoss(weight=w)
-            else:
-                loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(logits.view(-1, 2), labels.view(-1))
-
-        with torch.no_grad():
-            preds = F.softmax(logits, dim=-1).argmax(dim=-1)
-            acc = ((preds == labels).sum().float()) / len(labels)
-            print()
-            print(f"===>TRAIN PREDS: {preds}")
-            print(f"===>TRAIN LABEL: {labels}")
-            print(f"===>TRAIN ACCUR: {acc}")
-            print()
-
-        preds = preds.unsqueeze(0) if preds.dim() == 0 else preds
-        return {"loss": loss, "preds": preds, "targets": labels}
-
-    def training_epoch_end(self, outs):
-        preds = []
-        targets = []
-        losses = []
-        for out in outs:
-            losses.append(out["loss"] * len(out["targets"]))
-            targets.append(out["targets"])
-            preds.append(out["preds"])
-
-        preds = torch.cat(preds)
-        targets = torch.cat(targets)
-        loss = sum(losses) / len(targets)
-        acc = ((preds == targets).sum().float()) / len(targets)
-        print()
-        print(f"===>TRAIN BATCH ACCUR: {acc}")
-        print()
-        self.log_dict({"train_loss": loss, "train_acc": acc})
-
-    def validation_step(self, val_batch, batch_idx):
-        *_, labels = val_batch
-        logits, _ = self(val_batch)
-        if labels is not None:
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(logits.view(-1, 2), labels.view(-1))
-
-        preds = F.softmax(logits, dim=-1).argmax(dim=-1)
-        acc = ((preds == labels).sum().float()) / len(labels)
-        print()
-        print(f"===>VAL PREDS: {preds}")
-        print(f"===>VAL LABEL: {labels}")
-        print(f"===>VAL ACCUR: {acc}")
-        print()
-
-        preds = preds.unsqueeze(0) if preds.dim() == 0 else preds
-        return {"val_loss": loss, "preds": preds, "targets": labels}
-
-    def validation_epoch_end(self, outs):
-        preds = []
-        targets = []
-        losses = []
-        for out in outs:
-            losses.append(out["val_loss"] * len(out["targets"]))
-            targets.append(out["targets"])
-            preds.append(out["preds"])
-
-        preds = torch.cat(preds)
-        targets = torch.cat(targets)
-        loss = sum(losses) / len(targets)
-        acc = ((preds == targets).sum().float()) / len(targets)
-        print()
-        print(f"===>VAL BATCH ACCUR: {acc}")
-        print()
-        self.log_dict({"val_loss": loss, "val_acc": acc})
-
     def test_step(self, test_batch, batch_idx):
         *_, labels = test_batch
         logits, attn_weights = self(test_batch)
@@ -632,35 +846,13 @@ class MMIL(pl.LightningModule):
         print(f"===>TEST LABEL: {labels}")
         print()
 
-        # self.logger.experiment.log(
-        #     {
-        #         "roc": wandb.plots.ROC(
-        #             np.array(labels), np.array(probas), ["Not Depressed", "Depressed"]
-        #         )
-        #     }
-        # )
-        # self.logger.experiment.log(
-        #     {
-        #         "cm": wandb.sklearn.plot_confusion_matrix(
-        #             np.array(labels), np.array(preds), ["Not Depressed", "Depressed"]
-        #         )
-        #     }
-        # )
-        # precision, recall, fscore, _ = precision_recall_fscore_support(
-        #     labels, preds, average="binary"
-        # )
-        # self.log_dict({"precision": precision, "recall": recall, "fscore": fscore})
         precision, recall, fscore, _ = precision_recall_fscore_support(
             labels, preds, average="binary"
         )
         self.log_dict({"precision": precision, "recall": recall, "fscore": fscore, "test_loss": sum(loss)/len(loss)})
         print(f"Precision: {precision}\nRecall: {recall}\nFscore: {fscore}")
 
-    def init_layers(self):
-        init_weights(
-            self.text_proj, self.vis_proj, self.classifier, self.vis_norm, self.txt_norm
-        )
-
+    def init_rnn_layers(self):
         if self.rnn_type == "transformer":
             for name, param in self.rnn.named_parameters():
                 if "weight" in name:
@@ -670,248 +862,3 @@ class MMIL(pl.LightningModule):
                     nn.init.constant_(param.data, 0.0)
         elif self.rnn_type == "lstm":
             init_weights(self.rnn)
-# for name, param in lstm.named_parameters():
-#   if 'bias' in name:
-#      nn.init.constant(param, 0.0)
-#   elif 'weight' in name:
-#      nn.init.xavier_normal(param)
-        else:
-            pass
-
-    def freeze_layers(self, text_encoder: AutoModel, vis_encoder: ResNet):
-        for child in vis_encoder.children():
-            for param in child.parameters():
-                param.requires_grad = False
-
-        # textual
-        for name, param in text_encoder.named_parameters():
-            param.requires_grad = False
-
-        for name, param in text_encoder.pooler.named_parameters():
-            param.requires_grad = True
-
-        # Here we freeze all layers except the topmost layer.
-        # for both textual and visual encoders
-
-
-# Multimodal Single instance learning
-class MSIL(pl.LightningModule):
-    def __init__(
-        self,
-        scheduler_args: Dict[str, int] = None,
-        optimizer_args: Dict[str, int] = None,
-        vis_model: str = settings.VISUAL_MODEL,
-        language_model: str = settings.LANGUAGE_MODEL,
-        text: bool = True,
-        visual: bool = True,
-        clf_features: int = 512,
-        weight: bool = False
-    ):
-        super().__init__()
-        self.scheduler_args = scheduler_args
-        self.optimizer_args = optimizer_args
-        self.text_encoder = AutoModel.from_pretrained(language_model)
-        self.visual_encoder = getattr(models, vis_model)(pretrained=True)
-        self.visual_encoder.fc = nn.Identity()
-        self.dropout = nn.Dropout(0.2)
-        self.text_proj = nn.Linear(self.text_encoder.pooler.dense.out_features, clf_features)
-        self.vis_proj = nn.Linear(512, clf_features)
-        self.classifier = nn.Linear(clf_features, 2)
-        self.vis_norm = nn.LayerNorm(512)
-        self.txt_norm = nn.LayerNorm(self.text_encoder.pooler.dense.out_features)
-        self.relu = nn.ReLU()
-        self.text = text
-        self.visual = visual
-        self.weight = weight
-
-        self.init_layers()
-        self.freeze_layers(
-            self.text_encoder,
-            self.visual_encoder,
-        )
-        self.save_hyperparameters()
-
-    def forward(self, batch):
-        input_ids, attn_mask, imgs, labels = batch
-
-        textual_ftrs = 1
-        visual_ftrs = 1
-        if self.text:
-
-            textual_ftrs = self.text_encoder(input_ids.squeeze(), attn_mask.squeeze())[-1]
-            textual_ftrs = self.dropout(self.text_proj(self.txt_norm(textual_ftrs)))
-
-        if self.visual:
-
-            visual_ftrs = self.visual_encoder(imgs)
-            visual_ftrs = self.dropout(self.vis_proj(self.vis_norm(visual_ftrs)))
-
-        x = textual_ftrs * visual_ftrs
-
-        logits = self.classifier(x)
-
-        return logits
-
-    def configure_optimizers(self):
-        print(f"Optimizer args: {self.optimizer_args}")
-        optimizer = AdamW(self.parameters(), **self.optimizer_args)
-
-        if self.scheduler_args:
-            scheduler = get_linear_schedule_with_warmup(optimizer, **self.scheduler_args)
-            return [optimizer], [scheduler]
-        
-        return optimizer
-
-    def training_step(self, train_batch, batch_idx):
-        *_, labels = train_batch
-        logits = self(train_batch)
-        if labels is not None:
-            if self.weight:
-                w = torch.tensor([1.47, 1], dtype=logits.dtype, device=logits.device)
-                loss_fct = nn.CrossEntropyLoss(weight=w)
-            else:
-                loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(logits.view(-1, 2), labels.view(-1))
-
-        with torch.no_grad():
-            preds = F.softmax(logits, dim=-1).argmax(dim=-1)
-            acc = ((preds == labels).sum().float()) / len(labels)
-            print()
-            print(f"===>TRAIN PREDS: {preds}")
-            print(f"===>TRAIN LABEL: {labels}")
-            print(f"===>TRAIN ACCUR: {acc}")
-            print()
-
-        preds = preds.unsqueeze(0) if preds.dim() == 0 else preds
-        return {"loss": loss, "preds": preds, "targets": labels}
-
-    def training_epoch_end(self, outs):
-        preds = []
-        targets = []
-        losses = []
-        for out in outs:
-            losses.append(out["loss"] * len(out["targets"]))
-            targets.append(out["targets"])
-            preds.append(out["preds"])
-
-        preds = torch.cat(preds)
-        targets = torch.cat(targets)
-        loss = sum(losses) / len(targets)
-        acc = ((preds == targets).sum().float()) / len(targets)
-        print()
-        print(f"===>TRAIN BATCH ACCUR: {acc}")
-        print()
-        self.log_dict({"train_loss": loss, "train_acc": acc})
-
-    def validation_step(self, val_batch, batch_idx):
-        *_, labels = val_batch
-        logits = self(val_batch)
-        if labels is not None:
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(logits.view(-1, 2), labels.view(-1))
-
-        preds = F.softmax(logits, dim=-1).argmax(dim=-1)
-        acc = ((preds == labels).sum().float()) / len(labels)
-        print()
-        print(f"===>VAL PREDS: {preds}")
-        print(f"===>VAL LABEL: {labels}")
-        print(f"===>VAL ACCUR: {acc}")
-        print()
-
-        preds = preds.unsqueeze(0) if preds.dim() == 0 else preds
-        return {"val_loss": loss, "preds": preds, "targets": labels}
-
-    def validation_epoch_end(self, outs):
-        preds = []
-        targets = []
-        losses = []
-        for out in outs:
-            losses.append(out["val_loss"] * len(out["targets"]))
-            targets.append(out["targets"])
-            preds.append(out["preds"])
-
-        preds = torch.cat(preds)
-        targets = torch.cat(targets)
-        loss = sum(losses) / len(targets)
-        acc = ((preds == targets).sum().float()) / len(targets)
-        print()
-        print(f"===>VAL BATCH ACCUR: {acc}")
-        print()
-        self.log_dict({"val_loss": loss, "val_acc": acc})
-
-    def test_step(self, test_batch, batch_idx):
-        *_, labels = test_batch
-        logits = self(test_batch)
-        preds = F.softmax(logits, dim=-1).argmax(dim=-1)
-        probas = F.softmax(logits, dim=-1)
-
-        if labels is not None:
-            loss_fct = nn.CrossEntropyLoss(reduction="none")
-            loss = loss_fct(logits.view(-1, 2), labels.view(-1)).cpu()
-
-        labels = labels.cpu().tolist()
-        probas = probas.cpu().tolist()
-        preds = preds.cpu().tolist()
-        loss = loss.cpu().tolist()
-        # return (labels, probas, preds, attn_weights, loss, inpt)
-        return (labels, probas, preds, loss)
-
-    def test_epoch_end(self, outputs):
-        labels = []
-        probas = []
-        preds = []
-        loss = []
-        for i in outputs:
-            labels.extend(i[0])
-            probas.extend(i[1])
-            preds.extend(i[2])
-            loss.extend(i[3])
-
-        print()
-        print(f"===>TEST PREDS: {preds}")
-        print(f"===>TEST LABEL: {labels}")
-        print()
-
-        # self.logger.experiment.log(
-        #     {
-        #         "roc": wandb.plots.ROC(
-        #             np.array(labels), np.array(probas), ["Not Depressed", "Depressed"]
-        #         )
-        #     }
-        # )
-        # self.logger.experiment.log(
-        #     {
-        #         "cm": wandb.sklearn.plot_confusion_matrix(
-        #             np.array(labels), np.array(preds), ["Not Depressed", "Depressed"]
-        #         )
-        #     }
-        # )
-        # precision, recall, fscore, _ = precision_recall_fscore_support(
-        #     labels, preds, average="binary"
-        # )
-        # self.log_dict({"precision": precision, "recall": recall, "fscore": fscore})
-        precision, recall, fscore, _ = precision_recall_fscore_support(
-            labels, preds, average="binary"
-        )
-        self.log_dict({"precision": precision, "recall": recall, "fscore": fscore, "test_loss": sum(loss)/len(loss)})
-        print(f"Precision: {precision}\nRecall: {recall}\nFscore: {fscore}")
-
-    def init_layers(self):
-        init_weights(
-            self.text_proj, self.vis_proj, self.classifier, self.vis_norm, self.txt_norm
-        )
-
-    def freeze_layers(self, text_encoder: AutoModel, vis_encoder: ResNet):
-        for child in vis_encoder.children():
-            for param in child.parameters():
-                param.requires_grad = False
-
-        # textual
-        for name, param in text_encoder.named_parameters():
-            param.requires_grad = False
-
-        for name, param in text_encoder.pooler.named_parameters():
-            param.requires_grad = True
-
-        # Here we freeze all layers except the topmost layer.
-        # for both textual and visual encoders

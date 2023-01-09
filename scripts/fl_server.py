@@ -1,5 +1,5 @@
 import flwr as fl
-
+import pickle
 import argparse
 
 DEFAULT_SERVER_ADDRESS = "[::]:8080"
@@ -54,13 +54,25 @@ def main() -> None:
     args = get_args()
 
     # Define strategy
-    strategy = fl.server.strategy.FedAvg(
+    # strategy = fl.server.strategy.FedAvg(
+    #     fraction_fit=args.sample_fraction,
+    #     fraction_eval=args.sample_fraction,
+    #     min_fit_clients=args.min_sample_size,
+    #     min_eval_clients=args.min_sample_size,
+    #     min_available_clients=args.min_num_clients,
+    #     evaluate_metrics_aggregation_fn=aggregate_metrics
+    # )
+    with open('weights.bin', 'rb') as fp:
+        initial_weights = pickle.load(fp)
+    initial_parameters = fl.common.weights_to_parameters(initial_weights)
+    strategy = fl.server.strategy.FedYogi(
         fraction_fit=args.sample_fraction,
         fraction_eval=args.sample_fraction,
         min_fit_clients=args.min_sample_size,
         min_eval_clients=args.min_sample_size,
         min_available_clients=args.min_num_clients,
-        evaluate_metrics_aggregation_fn=aggregate_metrics
+        evaluate_metrics_aggregation_fn=aggregate_metrics,
+        initial_parameters=initial_parameters
     )
 
     # Start Flower server for three rounds of federated learning
@@ -68,6 +80,7 @@ def main() -> None:
         server_address=args.server_address,
         config={"num_rounds": args.rounds},
         strategy=strategy,
+        grpc_max_message_length=1543194403
     )
 
 

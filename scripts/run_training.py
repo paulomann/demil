@@ -186,6 +186,12 @@ from transformers import AutoTokenizer
     help=f"Whether to randomize the order of posts or not.",
     default=True,
 )
+@click.option(
+    "--multimodal-model",
+    help=f"Name of the multimodal model. Empty by default. Valids: 'M-CLIP/XLM-Roberta-Large-Vit-B-16Plus'.",
+    default="",
+    type=click.STRING,
+)
 def train(
     gpu: int,
     name: str,
@@ -224,7 +230,8 @@ def train(
     timestamp: bool,
     dataset: str,
     shuffle_posts: bool,
-    mil: bool
+    mil: bool,
+    multimodal_model: str
 ):
     seed_everything(seed)
     parameters = locals()
@@ -238,8 +245,8 @@ def train(
     if ignore_pad and use_mask:
         raise ValueError("You cannot use --ignore-pad and --use-mask at the same time.")
 
-    settings.LANGUAGE_MODEL = language_model
-    tokenizer = AutoTokenizer.from_pretrained(language_model)
+    settings.LANGUAGE_MODEL = multimodal_model if multimodal_model else language_model
+    tokenizer = AutoTokenizer.from_pretrained(multimodal_model) if multimodal_model else AutoTokenizer.from_pretrained(language_model)
     train, val, test = get_dataloaders(
         period=period,
         batch_size=bsz,
@@ -250,7 +257,8 @@ def train(
         dataset=dataset,
         shuffle_posts=shuffle_posts,
         mil=mil,
-        use_visual=visual
+        use_visual=visual,
+        multimodal_model=multimodal_model
     )
     gradient_accumulation_steps = 1
     t_total = (len(train) // gradient_accumulation_steps) * epochs
@@ -293,7 +301,8 @@ def train(
             text=text,
             visual=visual,
             pos_embedding=pos_embedding,
-            timestamp=timestamp
+            timestamp=timestamp,
+            multimodal_model=multimodal_model
         )
     else:
         model = MSIL(
@@ -303,8 +312,9 @@ def train(
             vis_model=vis_model,
             text=text,
             visual=visual,
-            clf_features=d_model,
-            weight=weight
+            d_model=d_model,
+            weight=weight,
+            multimodal_model=multimodal_model
         )
     trainer = pl.Trainer(
         deterministic=True,
@@ -319,6 +329,7 @@ def train(
         default_root_dir=settings.MODELS_PATH,
         overfit_batches=overfit
     )
+    # print(pl.utilities.model_summary.ModelSummary(model, max_depth=-1))
     trainer.fit(model, train, val)
     trainer.test(dataloaders=test, ckpt_path='best')
 

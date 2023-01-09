@@ -14,6 +14,7 @@ from transformers import AutoTokenizer
 
 import flwr as fl
 from collections import OrderedDict
+import pickle as pk
 
 @click.command()
 @click.option(
@@ -286,7 +287,13 @@ text: bool, visual: bool, pos_embedding: str, timestamp: bool, dataset: str, shu
 
     # Flower client
     client = FlowerClient(model=model, trainer_params=trainer_params, train=train, val=val, test=test)
-    fl.client.start_numpy_client("[::]:8080", client)
+    fl.client.start_numpy_client("[::]:8080", client, grpc_max_message_length=1543194403)
+
+    # print(f"WRITING WEIGHTS FOR SEED {seed}")
+    # weights = [val.cpu().numpy() for _, val in model.state_dict().items()]
+    # with open("weights.bin", "wb") as handle:
+    #     pk.dump(weights, handle, protocol=pk.HIGHEST_PROTOCOL)
+
 
 class FlowerClient(fl.client.NumPyClient):
     def __init__(self, model, trainer_params, train, val, test):

@@ -43,6 +43,12 @@ ENGLISH_BERT = [
 ]
 XLM = ["xlm-roberta-base", "xlm-roberta-large"]
 
+CLIP = ["M-CLIP/XLM-Roberta-Large-Vit-B-16Plus"]
+
+HUGGINGFACE_CLIP_TO_VISUAL = {
+    "M-CLIP/XLM-Roberta-Large-Vit-B-16Plus": "ViT-B-16-plus-240"
+}
+
 
 # ============= Create necessary folders =============
 

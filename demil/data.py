@@ -13,6 +13,7 @@ import copy
 import random
 from datetime import datetime
 from pathlib import Path
+import open_clip
 
 
 def shuffle_posts(
@@ -68,111 +69,111 @@ def random_crop(posts: List[Union[User, TwitterUser]]) -> List[Union[User, Twitt
     return crop
 
 
-class DepressBR(torch.utils.data.Dataset):
-    def __init__(
-        self,
-        dataset_type: Literal["train", "val", "test"],
-        tokenizer: PreTrainedTokenizer,
-        max_seq_length: int = settings.MAX_SEQ_LENGTH,
-        data_augmentation: bool = False,
-        get_raw_data: bool = False,
-        shuffle_posts: bool = False,
-    ):
-        self.dataset_type = dataset_type
-        self.max_seq_length = max_seq_length
-        self.shuffle_posts = shuffle_posts
-        self.dataset = utils.get_depressbr_dataset(dataset_type)
-        self.tokenizer = tokenizer
-        self.max_seq_length = max_seq_length
-        self.data_augmentation = data_augmentation
-        self.get_raw_data = get_raw_data
+# class DepressBR(torch.utils.data.Dataset):
+#     def __init__(
+#         self,
+#         dataset_type: Literal["train", "val", "test"],
+#         tokenizer: PreTrainedTokenizer,
+#         max_seq_length: int = settings.MAX_SEQ_LENGTH,
+#         data_augmentation: bool = False,
+#         get_raw_data: bool = False,
+#         shuffle_posts: bool = False,
+#     ):
+#         self.dataset_type = dataset_type
+#         self.max_seq_length = max_seq_length
+#         self.shuffle_posts = shuffle_posts
+#         self.dataset = utils.get_depressbr_dataset(dataset_type)
+#         self.tokenizer = tokenizer
+#         self.max_seq_length = max_seq_length
+#         self.data_augmentation = data_augmentation
+#         self.get_raw_data = get_raw_data
 
-    def __len__(self):
-        return len(self.dataset)
+#     def __len__(self):
+#         return len(self.dataset)
 
-    def __getitem__(self, i):
-        user = self.dataset[i]
-        texts_crop = None
-        texts = user.posts[-self.max_seq_length :]
-        if (
-            self.data_augmentation
-            and self.dataset_type == "train"
-            and random.random() < 0.20
-        ):
-            texts_crop = random_crop(texts)
-        texts = texts_crop if texts_crop else texts
-        label = user.label
-        if self.shuffle_posts:
-            random.shuffle(texts)
-        if self.get_raw_data:
-            return (texts, None, None, label)
-        captions_tensors = self.tokenizer(
-            texts,
-            add_special_tokens=True,
-            max_length=512,
-            padding="max_length",
-            return_tensors="pt",
-            return_attention_mask=True,
-            truncation=True,
-        )
-        captions_tensors["attention_mask"] = captions_tensors["attention_mask"].float()
-        return (captions_tensors, None, None, label)
+#     def __getitem__(self, i):
+#         user = self.dataset[i]
+#         texts_crop = None
+#         texts = user.posts[-self.max_seq_length :]
+#         if (
+#             self.data_augmentation
+#             and self.dataset_type == "train"
+#             and random.random() < 0.20
+#         ):
+#             texts_crop = random_crop(texts)
+#         texts = texts_crop if texts_crop else texts
+#         label = user.label
+#         if self.shuffle_posts:
+#             random.shuffle(texts)
+#         if self.get_raw_data:
+#             return (texts, None, None, label)
+#         captions_tensors = self.tokenizer(
+#             texts,
+#             add_special_tokens=True,
+#             max_length=512,
+#             padding="max_length",
+#             return_tensors="pt",
+#             return_attention_mask=True,
+#             truncation=True,
+#         )
+#         captions_tensors["attention_mask"] = captions_tensors["attention_mask"].float()
+#         return (captions_tensors, None, None, label)
 
 
-def depressbr_collate_fn(data: Tuple):
-    x = 0
-    labels = torch.zeros(
-        len(data), device=data[0][0]["input_ids"].device, dtype=torch.long
-    )
-    batch_input_ids = []
-    batch_attn_mask_ids = []
-    batch_post_attn_mask = []
-    # Here, we want to createa a Sequence [p1, ..., pn] where the first element of
-    # the sequence starts in p1 and goes until pi, which is the last element of
-    # the sequence. From pi ... pn we padd the sequence until settings.MAX_SEQ_LENGTH
-    for i, example in enumerate(data):
+# def depressbr_collate_fn(data: Tuple):
+#     x = 0
+#     labels = torch.zeros(
+#         len(data), device=data[0][0]["input_ids"].device, dtype=torch.long
+#     )
+#     batch_input_ids = []
+#     batch_attn_mask_ids = []
+#     batch_post_attn_mask = []
+#     # Here, we want to createa a Sequence [p1, ..., pn] where the first element of
+#     # the sequence starts in p1 and goes until pi, which is the last element of
+#     # the sequence. From pi ... pn we padd the sequence until settings.MAX_SEQ_LENGTH
+#     for i, example in enumerate(data):
 
-        textual_data, _, _, label = example
-        input_ids, attn_mask = textual_data["input_ids"], textual_data["attention_mask"]
-        fill = settings.MAX_SEQ_LENGTH - input_ids.size(0)
-        posts_mask = torch.ones(
-            settings.MAX_SEQ_LENGTH, dtype=torch.bool, device=attn_mask.device
-        )
-        posts_mask[: input_ids.size(0)] = False
-        n_tokens = input_ids.size(1)
-        input_ids_pad = []
-        attn_mask_pad = []
-        batch_post_attn_mask.append(posts_mask)
+#         textual_data, _, _, label = example
+#         input_ids, attn_mask = textual_data["input_ids"], textual_data["attention_mask"]
+#         fill = settings.MAX_SEQ_LENGTH - input_ids.size(0)
+#         posts_mask = torch.ones(
+#             settings.MAX_SEQ_LENGTH, dtype=torch.bool, device=attn_mask.device
+#         )
+#         posts_mask[: input_ids.size(0)] = False
+#         n_tokens = input_ids.size(1)
+#         input_ids_pad = []
+#         attn_mask_pad = []
+#         batch_post_attn_mask.append(posts_mask)
 
-        input_ids_pad.append(input_ids)
-        attn_mask_pad.append(attn_mask)
+#         input_ids_pad.append(input_ids)
+#         attn_mask_pad.append(attn_mask)
 
-        for _ in range(0, fill):
-            aux_input_ids, aux_attn_mask = get_input_ids_attn_mask(
-                n_tokens,
-                device=input_ids.device,
-                i_ids_dtype=input_ids.dtype,
-                attn_dtype=attn_mask.dtype,
-            )
-            input_ids_pad.append(aux_input_ids)
-            attn_mask_pad.append(aux_attn_mask)
+#         for _ in range(0, fill):
+#             aux_input_ids, aux_attn_mask = get_input_ids_attn_mask(
+#                 n_tokens,
+#                 device=input_ids.device,
+#                 i_ids_dtype=input_ids.dtype,
+#                 attn_dtype=attn_mask.dtype,
+#             )
+#             input_ids_pad.append(aux_input_ids)
+#             attn_mask_pad.append(aux_attn_mask)
 
-        batch_input_ids.append(torch.cat(input_ids_pad, 0))
-        batch_attn_mask_ids.append(torch.cat(attn_mask_pad, 0))
+#         batch_input_ids.append(torch.cat(input_ids_pad, 0))
+#         batch_attn_mask_ids.append(torch.cat(attn_mask_pad, 0))
 
-        labels[i] = label
+#         labels[i] = label
 
-    batch_input_ids = torch.stack(batch_input_ids)
-    batch_attn_mask_ids = torch.stack(batch_attn_mask_ids)
-    batch_post_attn_mask = torch.stack(batch_post_attn_mask)
+#     batch_input_ids = torch.stack(batch_input_ids)
+#     batch_attn_mask_ids = torch.stack(batch_attn_mask_ids)
+#     batch_post_attn_mask = torch.stack(batch_post_attn_mask)
 
-    return (
-        (batch_input_ids, batch_attn_mask_ids),
-        None,
-        batch_post_attn_mask,
-        None,
-        labels,
-    )
+#     return (
+#         (batch_input_ids, batch_attn_mask_ids),
+#         None,
+#         batch_post_attn_mask,
+#         None,
+#         labels,
+#     )
 
 
 class DepressionCorpus(torch.utils.data.Dataset):
@@ -188,7 +189,8 @@ class DepressionCorpus(torch.utils.data.Dataset):
         get_raw_data: bool = False,
         shuffle_posts: bool = False,
         mil: bool = True,
-        use_visual: bool = False
+        use_visual: bool = False,
+        multimodal_model: str = ""
     ):
         self.dataset = get_mil_dataset(dataset, period, dataset_type) if mil else get_sil_dataset(dataset, period, dataset_type)
         self.dataset_type = dataset_type
@@ -200,17 +202,19 @@ class DepressionCorpus(torch.utils.data.Dataset):
         self.get_raw_data = get_raw_data
         self.mil = mil
         self.use_visual = use_visual
-        # if self.data_augmentation and self.dataset_type == "train":
-        #     self.dataset = augment_data(self.dataset)
-        self.transform = transforms.Compose(
-            [
-                transforms.Resize([224, 224], interpolation=Image.LANCZOS),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-                ),
-            ]
-        )
+
+        if multimodal_model:
+            _, _, self.transform = open_clip.create_model_and_transforms(settings.HUGGINGFACE_CLIP_TO_VISUAL[multimodal_model])
+        else:
+            self.transform = transforms.Compose(
+                [
+                    transforms.Resize([224, 224], interpolation=Image.LANCZOS),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                    ),
+                ]
+            )
 
     def get_time_slots(self, tstamps: List[datetime]):
         idx = [0]
@@ -331,8 +335,11 @@ class DepressionCorpus(torch.utils.data.Dataset):
         if img is None:
             img = torch.tensor([])
             # img = torch.zeros_like(captions_tensors["attention_mask"])
+        
+        if self.dataset_type == "test":
+            return (captions_tensors["input_ids"], captions_tensors["attention_mask"], img, username, label)
 
-        return (captions_tensors["input_ids"], captions_tensors["attention_mask"], img, label)
+        return (captions_tensors["input_ids"], captions_tensors["attention_mask"], img, "", label)
 
     
     def __getitem__(self, i):
@@ -350,7 +357,7 @@ def get_input_ids_attn_mask(
         attn_mask = torch.zeros(size=(1, n_tokens), device=device, dtype=attn_dtype)
         attn_mask[0][0], attn_mask[0][1] = 1.0, 1.0
 
-    elif settings.LANGUAGE_MODEL in settings.XLM:
+    elif settings.LANGUAGE_MODEL in settings.XLM or settings.LANGUAGE_MODEL in settings.CLIP:
         input_ids = torch.ones(size=(1, n_tokens), device=device, dtype=i_ids_dtype)
         input_ids[0][0], input_ids[0][1] = 0, 2
         attn_mask = torch.zeros(size=(1, n_tokens), device=device, dtype=attn_dtype)
@@ -459,7 +466,8 @@ def get_dataloaders(
     dataset: Literal["instagram", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"] = "instagram",
     shuffle_posts: bool = False,
     mil: bool = True,
-    use_visual: bool = False
+    use_visual: bool = False,
+    multimodal_model: str = ""
 ):
     # available_datasets = ["instagram", "DepressBR", "eRisk2021", "LOSADA2016", "eRisk+LOSADA", "twitter"]
     # if dataset not in available_datasets:
@@ -467,16 +475,16 @@ def get_dataloaders(
     if tokenizer is None:
         tokenizer = AutoTokenizer.from_pretrained(settings.LANGUAGE_MODEL)
 
-    if dataset == "DepressBR":
-        train = DepressBR("train", tokenizer, data_augmentation=augment_data)
-        val = DepressBR("val", tokenizer, data_augmentation=augment_data)
-        test = DepressBR("test", tokenizer, data_augmentation=augment_data)
-        collate = depressbr_collate_fn
-    else:
-        train = DepressionCorpus(dataset, period, "train", tokenizer, regression, data_augmentation=augment_data, shuffle_posts=shuffle_posts, mil=mil, use_visual=use_visual)
-        val = DepressionCorpus(dataset, period, "val", tokenizer, regression, data_augmentation=augment_data, mil=mil, use_visual=use_visual)
-        test = DepressionCorpus(dataset, period, "test", tokenizer, regression, data_augmentation=augment_data, mil=mil, use_visual=use_visual)
-        collate = collate_fn
+    # if dataset == "DepressBR":
+    #     train = DepressBR("train", tokenizer, data_augmentation=augment_data)
+    #     val = DepressBR("val", tokenizer, data_augmentation=augment_data)
+    #     test = DepressBR("test", tokenizer, data_augmentation=augment_data)
+    #     collate = depressbr_collate_fn
+    # else:
+    train = DepressionCorpus(dataset, period, "train", tokenizer, regression, data_augmentation=augment_data, shuffle_posts=shuffle_posts, mil=mil, use_visual=use_visual, multimodal_model=multimodal_model)
+    val = DepressionCorpus(dataset, period, "val", tokenizer, regression, data_augmentation=augment_data, mil=mil, use_visual=use_visual, multimodal_model=multimodal_model)
+    test = DepressionCorpus(dataset, period, "test", tokenizer, regression, data_augmentation=augment_data, mil=mil, use_visual=use_visual, multimodal_model=multimodal_model)
+    collate = collate_fn
 
     train_loader = DataLoader(
         train,
