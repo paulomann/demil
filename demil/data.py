@@ -341,7 +341,7 @@ class DepressionCorpus(torch.utils.data.Dataset):
 
         return (captions_tensors["input_ids"], captions_tensors["attention_mask"], img, "", label)
 
-    
+    # TODO : Alterar isso aqui, vide README.md
     def __getitem__(self, i):
         if self.mil:
             return self.getitem_mil(i)

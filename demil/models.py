@@ -595,20 +595,23 @@ class MSIL(pl.LightningModule):
         print(f"===>TEST LABEL: {labels}")
         print()
 
-        self.logger.experiment.log(
-            {
-                "roc": wandb.plots.ROC(
-                    np.array(labels), np.array(probas), ["Not Depressed", "Depressed"]
-                )
-            }
-        )
-        self.logger.experiment.log(
-            {
-                "cm": wandb.sklearn.plot_confusion_matrix(
-                    np.array(labels), np.array(preds), ["Not Depressed", "Depressed"]
-                )
-            }
-        )
+        if self.logger:
+            
+            self.logger.experiment.log(
+                {
+                    "roc": wandb.plots.ROC(
+                        np.array(labels), np.array(probas), ["Not Depressed", "Depressed"]
+                    )
+                }
+            )
+            self.logger.experiment.log(
+                {
+                    "cm": wandb.sklearn.plot_confusion_matrix(
+                        np.array(labels), np.array(preds), ["Not Depressed", "Depressed"]
+                    )
+                }
+            )
+
         precision, recall, fscore, _ = precision_recall_fscore_support(labels, preds, average="binary")
         self.log_dict({"precision": precision, "recall": recall, "fscore": fscore, "test_loss": sum(loss)/len(loss)})
         print(f"Precision: {precision}\nRecall: {recall}\nFscore: {fscore}")

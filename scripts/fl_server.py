@@ -54,14 +54,18 @@ def main() -> None:
     args = get_args()
 
     # Define strategy
-    # strategy = fl.server.strategy.FedAvg(
-    #     fraction_fit=args.sample_fraction,
-    #     fraction_eval=args.sample_fraction,
-    #     min_fit_clients=args.min_sample_size,
-    #     min_eval_clients=args.min_sample_size,
-    #     min_available_clients=args.min_num_clients,
-    #     evaluate_metrics_aggregation_fn=aggregate_metrics
-    # )
+    
+    '''
+    strategy = fl.server.strategy.FedAvg(
+        fraction_fit=args.sample_fraction,
+        fraction_eval=args.sample_fraction,
+        min_fit_clients=args.min_sample_size,
+        min_eval_clients=args.min_sample_size,
+        min_available_clients=args.min_num_clients,
+        evaluate_metrics_aggregation_fn=aggregate_metrics
+    )
+    '''
+    
     with open('weights.bin', 'rb') as fp:
         initial_weights = pickle.load(fp)
     initial_parameters = fl.common.weights_to_parameters(initial_weights)

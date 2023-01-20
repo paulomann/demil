@@ -266,7 +266,7 @@ text: bool, visual: bool, pos_embedding: str, timestamp: bool, dataset: str, shu
             vis_model=vis_model,
             text=text,
             visual=visual,
-            clf_features=d_model,
+            d_model=d_model,
             weight=weight
         )
     trainer_params = {
@@ -289,10 +289,12 @@ text: bool, visual: bool, pos_embedding: str, timestamp: bool, dataset: str, shu
     client = FlowerClient(model=model, trainer_params=trainer_params, train=train, val=val, test=test)
     fl.client.start_numpy_client("[::]:8080", client, grpc_max_message_length=1543194403)
 
-    # print(f"WRITING WEIGHTS FOR SEED {seed}")
-    # weights = [val.cpu().numpy() for _, val in model.state_dict().items()]
-    # with open("weights.bin", "wb") as handle:
-    #     pk.dump(weights, handle, protocol=pk.HIGHEST_PROTOCOL)
+    '''
+    print(f"WRITING WEIGHTS FOR SEED {seed}")
+    weights = [val.cpu().numpy() for _, val in model.state_dict().items()]
+    with open("weights.bin", "wb") as handle:
+        pk.dump(weights, handle, protocol=pk.HIGHEST_PROTOCOL)
+    '''
 
 
 class FlowerClient(fl.client.NumPyClient):
@@ -316,18 +318,18 @@ class FlowerClient(fl.client.NumPyClient):
 
         self.trainer = pl.Trainer(**self.trainer_params)
 
-        # print("====BEFORE TRAINING: ", end="")
-        # for name, param in zip(range(5), self.model.classifier.named_parameters()):
-        #     print(name, param[:5])
-        #     break
+        print("====BEFORE TRAINING: ", end="")
+        for name, param in zip(range(5), self.model.classifier.named_parameters()):
+             print(name, param[:5])
+             break
         
         self.trainer.fit(self.model, self.train, self.val)
 
-        # print("====AFTER TRAINING: ", end="")
+        print("====AFTER TRAINING: ", end="")
 
-        # for name, param in zip(range(5), self.model.classifier.named_parameters()):
-        #     print(name, param[:5])
-        #     break
+        for name, param in zip(range(5), self.model.classifier.named_parameters()):
+            print(name, param[:5])
+            break
 
         return self.get_parameters(), len(self.train.dataset), {}
 
