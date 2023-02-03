@@ -7,6 +7,7 @@ from PIL import Image
 from demil import settings
 import demil.utils as utils
 from demil.utils import User, TwitterUser, Post
+import demil.models
 import pandas as pd
 import scipy.io as sio
 import copy

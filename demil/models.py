@@ -18,6 +18,63 @@ from demil.utils import get_bert_config
 from einops import reduce, rearrange
 from multilingual_clip.pt_multilingual_clip import MultilingualCLIP
 import open_clip
+import fasttext
+import fasttext.util
+
+class PoolerWrapper():
+    def __init__(self, out_features) -> None:
+        self.dense = DenseWrapper(out_features=out_features)
+
+class DenseWrapper():
+    
+    def __init__(self, out_features) -> None:
+        self.out_features = out_features
+
+class FastTextWrapper():
+
+    def __init__(self):
+        # TODO : To ensure platform agnostic running we need to change this
+        # fasttext.util.download_model('en', if_exists='ignore')
+        self.ft = fasttext.load_model('/home/arthurbittencourt/depression-demil/demil/scripts/cc.en.300.bin')   
+        self.pooler = PoolerWrapper(self.ft.get_dimension())
+
+    def __call__(self, input_ids, attn_mask):
+        
+        print("Input Ids: ", input_ids)
+        print("Attn_Mask: ", attn_mask)
+
+    def tokenizer(self,
+            caption,
+            add_special_tokens=True,
+            max_length=512,
+            padding="max_length",
+            return_tensors="pt",
+            return_attention_mask=True,
+            truncation=True,
+        ):
+
+        tokens = fasttext.tokenize(caption)
+
+        input_ids = [self.ft.get_word_id(word) for word in tokens]
+
+        if len(input_ids) < max_length and padding == "max_length":
+            input_ids.extend([0]*(max_length - len(input_ids)))
+        elif len(input_ids) > max_length:
+            input_ids = input_ids[:max_length]
+        
+        input_ids = torch.tensor(input_ids)
+
+        # type_ids seems unused in the current implementation
+        type_ids = torch.zeros(len(input_ids))
+
+        attn_mask = [1 * len(input_ids)]
+        attn_mask = torch.tensor(attn_mask)
+
+        return {'input_ids':input_ids, 'token_type_ids':type_ids ,'attention_mask':attn_mask}
+
+            
+
+
 
 class TextMCLIP(MultilingualCLIP):
 
@@ -368,6 +425,7 @@ class MSIL(pl.LightningModule):
         weight: bool = False,
         multimodal_model: str = ""
     ):
+        
         super().__init__()
         self.scheduler_args = scheduler_args
         self.optimizer_args = optimizer_args
@@ -402,11 +460,16 @@ class MSIL(pl.LightningModule):
         self.save_hyperparameters()
 
     def init_encoders(self, text: bool, visual: bool, vis_model: str, language_model: str, multimodal_model: str):
-        visual_encder, text_encoder = None, None
+        
+        visual_encoder, text_encoder = None, None
         if multimodal_model:
             # visual_encoder = open_clip.create_model(settings.HUGGINGFACE_CLIP_TO_VISUAL[multimodal_model])
             visual_encoder = VisualMCLIP(multimodal_model)
             text_encoder = TextMCLIP.from_pretrained(multimodal_model)
+        if language_model == 'fasttext':
+            visual_encoder = getattr(models, vis_model)(pretrained=True)
+            visual_encoder.fc = nn.Identity()
+            text_encoder = FastTextWrapper()
         else:
             visual_encoder = getattr(models, vis_model)(pretrained=True)
             visual_encoder.fc = nn.Identity()
@@ -646,10 +709,11 @@ class MSIL(pl.LightningModule):
                 param.requires_grad = False
 
         # textual
-        for name, param in text_encoder.named_parameters():
-            param.requires_grad = False
+        if hasattr(text_encoder, "named_parameters"):
+            for name, param in text_encoder.named_parameters():
+                param.requires_grad = False
 
-        if hasattr(text_encoder, "pooler"):
+        if hasattr(text_encoder, "pooler") and hasattr(text_encoder.pooler, "named_parameters"):
             for name, param in text_encoder.pooler.named_parameters():
                 param.requires_grad = True
 

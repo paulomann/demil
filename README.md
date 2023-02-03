@@ -11,6 +11,8 @@
   python fl_client.py --gpu 6 --bsz 64 --epochs 5 --no-use-mask --ignore-pad --gradient-clip-val 1 --nhead 2 --num-encoder-layers 4 --d-model 512 --lr 5e-4 --weight-decay 1e-5 --period -1 --language-model bert-base-cased --no-mil --rnn-type bert --shuffle --name eRisk2021 --no-wandb --text --no-visual --pos-embedding relative_key_query --dataset eRisk2021
 
   python fl_client.py --gpu 7 --bsz 64 --epochs 5 --no-use-mask --ignore-pad --gradient-clip-val 1 --nhead 2 --num-encoder-layers 4 --d-model 512 --lr 5e-4 --weight-decay 1e-5 --period -1 --language-model bert-base-cased --no-mil --rnn-type bert --shuffle --name LOSADA2016 --no-wandb --text --no-visual --pos-embedding relative_key_query --dataset LOSADA2016
+
+  python run_training.py --gpu 7 --bsz 64 --epochs 5 --no-use-mask --ignore-pad --gradient-clip-val 1 --nhead 2 --num-encoder-layers 4 --d-model 512 --lr 5e-4 --weight-decay 1e-5 --period -1 --language-model fasttext --no-mil --rnn-type bert --shuffle --name eRisk2021 --no-wandb --text --no-visual --pos-embedding relative_key_query --dataset eRisk2021
  ```
 
 ## TODO : 

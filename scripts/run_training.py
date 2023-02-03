@@ -11,7 +11,8 @@ from demil.data import collate_fn_mil
 from demil.models import MMIL, MSIL
 import click
 from transformers import AutoTokenizer
-
+import demil.models
+import fasttext
 
 @click.command()
 @click.option(
@@ -246,7 +247,12 @@ def train(
         raise ValueError("You cannot use --ignore-pad and --use-mask at the same time.")
 
     settings.LANGUAGE_MODEL = multimodal_model if multimodal_model else language_model
-    tokenizer = AutoTokenizer.from_pretrained(multimodal_model) if multimodal_model else AutoTokenizer.from_pretrained(language_model)
+    
+    if language_model == 'fasttext':
+        tokenizer = demil.models.FastTextWrapper().tokenizer
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(multimodal_model) if multimodal_model else AutoTokenizer.from_pretrained(language_model)
+    
     train, val, test = get_dataloaders(
         period=period,
         batch_size=bsz,
