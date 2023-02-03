@@ -57,23 +57,21 @@ class FastTextWrapper():
 
         input_ids = [self.ft.get_word_id(word) for word in tokens]
 
-        if len(input_ids) < max_length and padding == "max_length":
-            input_ids.extend([0]*(max_length - len(input_ids)))
-        elif len(input_ids) > max_length:
-            input_ids = input_ids[:max_length]
-        
-        input_ids = torch.tensor(input_ids)
+        length = min(len(input_ids), max_length)
+        if (length < max_length): padding_length = max_length - len(input_ids) 
+        else: padding_length = 0
+
+        input_ids.extend([0]*padding_length)       
+        input_ids = torch.tensor(input_ids[:max_length])
 
         # type_ids seems unused in the current implementation
         type_ids = torch.zeros(len(input_ids))
 
-        attn_mask = [1 * len(input_ids)]
+        attn_mask = [1] * length
+        attn_mask.extend([0]*padding_length)
         attn_mask = torch.tensor(attn_mask)
 
         return {'input_ids':input_ids, 'token_type_ids':type_ids ,'attention_mask':attn_mask}
-
-            
-
 
 
 class TextMCLIP(MultilingualCLIP):
