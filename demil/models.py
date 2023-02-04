@@ -39,7 +39,7 @@ class FastTextWrapper():
         self.pooler = PoolerWrapper(self.ft.get_dimension())
 
     def __call__(self, input_ids, attn_mask):
-        
+        # TODO: Return something here
         print("Input Ids: ", input_ids)
         print("Attn_Mask: ", attn_mask)
 
