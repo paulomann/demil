@@ -147,38 +147,45 @@ def get_args():
     parser.add_argument('--partition', type=str, default='homo', help='the data partitioning strategy')
     parser.add_argument('--n_parties', type=int, default=5,  help='number of workers in a distributed cluster')
     parser.add_argument('--init_seed', type=int, default=0, help="Random seed")
-    parser.add_argument('--datadir', type=str, required=False, default="/home/arthurbittencourt/depression-demil/demil/data/eRisk2021/train.csv", help="Data directory")
+    parser.add_argument('--datadir', type=str, required=False, default="/home/arthurbittencourt/depression-demil/demil/data/eRisk2021/", help="Data directory")
     parser.add_argument('--outputdir', type=str, required=False, default="/home/arthurbittencourt/depression-demil/demil/data/eRisk2021_partitioned/", help="Output directory")
     parser.add_argument('--beta', type=float, default=0.5, help='The parameter for the dirichlet distribution for data partitioning')
     args = parser.parse_args()
     return args
 
-
-if __name__ == '__main__':
-    args = get_args()
-    num = -1
-    dataset_pd = pd.read_csv(args.datadir)
+def get_dataset(data_dir):
+    dataset_pd = pd.read_csv(data_dir)
 
     bdi = dataset_pd['bdi']
 
     bdi_0 = bdi.where(bdi >= 20, 0)
-    bdi_1 = bdi_0.where(bdi_0 < 20, 1)
+    dataset_pd['Class'] = bdi_0.where(bdi_0 < 20, 1)
 
-    dataset_pd['Class'] = bdi_1
+    return np.array(dataset_pd), dataset_pd.columns.to_list()
 
-    dataset = np.array(dataset_pd)
+if __name__ == '__main__':
+    args = get_args()
+    
+
 
     # hardcoded for eRisk2021 for now, parameter later
     class_id = -1
     num_class = 2 
-    header = dataset_pd.columns.to_list()
 
-    net_dataidx_map = partition_data(dataset, class_id, num_class, args.partition, args.n_parties, args.beta, args.init_seed)
     mkdirs(args.outputdir)
-    for i in range(args.n_parties):
-        file_name = args.outputdir+str(i)+'.csv'
-        os.system("touch "+file_name)
-        with open(file_name, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-            writer.writerows(dataset[net_dataidx_map[i]])
+
+    datadir = os.path.dirname(args.datadir)
+    dir_list = [name.replace('.csv', '') for name in  os.listdir(datadir)]
+
+    for dir in dir_list:
+
+        dataset, header = get_dataset(args.datadir + dir + '.csv')
+        net_dataidx_map = partition_data(dataset, class_id, num_class, args.partition, args.n_parties, args.beta, args.init_seed)
+        mkdirs(args.outputdir + f'/{dir}/')
+        for i in range(args.n_parties):
+            file_name = args.outputdir+f'/{dir}/'+str(i)+'.csv'
+            os.system("touch "+file_name)
+            with open(file_name, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+                writer.writerows(dataset[net_dataidx_map[i]])
