@@ -150,6 +150,8 @@ def get_args():
     parser.add_argument('--datadir', type=str, required=False, default="/home/arthurbittencourt/depression-demil/demil/data/eRisk2021/", help="Data directory")
     parser.add_argument('--outputdir', type=str, required=False, default="/home/arthurbittencourt/depression-demil/demil/data/eRisk2021_partitioned/", help="Output directory")
     parser.add_argument('--beta', type=float, default=0.5, help='The parameter for the dirichlet distribution for data partitioning')
+    parser.add_argument('--num_classes', type=int, default=2, help='Number of distinct classes in dataset')
+    parser.add_argument('--class_id', type=int, default=-1, help='Index for the \"Class\" column')
     args = parser.parse_args()
     return args
 
@@ -169,8 +171,8 @@ if __name__ == '__main__':
 
 
     # hardcoded for eRisk2021 for now, parameter later
-    class_id = -1
-    num_class = 2 
+    num_class = args.num_classes
+    class_id = args.class_id
 
     mkdirs(args.outputdir)
 
