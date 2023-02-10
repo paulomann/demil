@@ -290,12 +290,13 @@ class DepressionCorpus(torch.utils.data.Dataset):
         captions_tensors = self.tokenizer(
             captions,
             add_special_tokens=True,
-            max_length=512,
+            max_length=512, 
             padding="max_length",
             return_tensors="pt",
             return_attention_mask=True,
             truncation=True,
         )
+
 
         captions_tensors["attention_mask"] = captions_tensors["attention_mask"].float()
         if images:
@@ -314,7 +315,7 @@ class DepressionCorpus(torch.utils.data.Dataset):
         captions_tensors = self.tokenizer(
             caption,
             add_special_tokens=True,
-            max_length=512,
+            max_length=300, # TODO : This is not standard procedure, check it later
             padding="max_length",
             return_tensors="pt",
             return_attention_mask=True,
@@ -339,6 +340,8 @@ class DepressionCorpus(torch.utils.data.Dataset):
         
         if self.dataset_type == "test":
             return (captions_tensors["input_ids"], captions_tensors["attention_mask"], img, username, label)
+
+        # print(f"=======[caption_tensors]======> {captions_tensors}")
 
         return (captions_tensors["input_ids"], captions_tensors["attention_mask"], img, "", label)
 

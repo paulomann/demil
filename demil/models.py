@@ -40,8 +40,21 @@ class FastTextWrapper():
 
     def __call__(self, input_ids, attn_mask):
         # TODO: Return something here
-        print("Input Ids: ", input_ids)
-        print("Attn_Mask: ", attn_mask)
+        # print("Input Ids: ", input_ids)
+        # print("Attn_Mask: ", attn_mask)
+        
+        words_vector = self.ft.get_words()
+        input_words = [words_vector[input_id] for input_id in input_ids[0]]
+
+        input_sentence = ""
+        for word in input_words:
+            input_sentence += word
+
+        text_ftrs = self.ft.get_sentence_vector(input_sentence)
+        text_ftrs = torch.tensor(text_ftrs)
+        text_ftrs = text_ftrs.to('cuda:7') # TODO : When actually running this, this needs to get the gpu it runs
+
+        return None, text_ftrs
 
     def tokenizer(self,
             caption,
@@ -70,6 +83,12 @@ class FastTextWrapper():
         attn_mask = [1] * length
         attn_mask.extend([0]*padding_length)
         attn_mask = torch.tensor(attn_mask)
+
+        # print(f"=========[len(input_ids)]========>{len(input_ids)}")
+
+        input_ids = input_ids.unsqueeze(0)
+        attn_mask = attn_mask.unsqueeze(0)
+        type_ids = type_ids.unsqueeze(0)
 
         return {'input_ids':input_ids, 'token_type_ids':type_ids ,'attention_mask':attn_mask}
 
