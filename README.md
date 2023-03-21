@@ -17,23 +17,8 @@
 
 ## TODO : 
 
- - O log do servidor diz centralizar os scores, mas não mostra os scores centralizados. Talvez isso seja um print comentado, senão, eu posso botar um print no final do processo para mostrar esses scores. (Não é necessário, mas Rafaela me respondeu como fazer isso)
+ - Tentar rodar o classificador BERT como federado
 
- - Trocar do BERT para FastText, com embeddings do BERT
-
- - Ler estatisticas do dataset eRisk2021 + LOSADA2016 (Distribuição de tokens*, distribuição de classes, distribuição de datas)
-
- - - Tokenização, do jeito que você entendeu mesmo (usar SPACY) **Priorizar**
-
- - - Passar pelo bert tokenizer para saber como precisamos cortar os tokens (usar BERT)
-
- - Mandar as estatísticas por e-mail
-
- - Rodar Centralizado
-
- - Downsampling
-
- - Federado
 
 
 
