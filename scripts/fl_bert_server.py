@@ -6,6 +6,8 @@ import numpy as np
 import torch
 from transformers import AutoModelForSequenceClassification
 
+import centralized_eval
+
 DEFAULT_SERVER_ADDRESS = "[::]:8080"
 
 def get_args():
@@ -124,6 +126,8 @@ def main() -> None:
         strategy=strategy,
         grpc_max_message_length=1543194403
     )
+
+    centralized_eval.final_evaluate(net, args.gpu)
 
 
 if __name__ == "__main__":

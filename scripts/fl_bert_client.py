@@ -27,13 +27,18 @@ def get_args():
     parser = argparse.ArgumentParser(description="Creating a bert client for federated learning")
     parser.add_argument("--gpu", type=int, default=7, help="wich device this client will use")
     parser.add_argument("--dataset_piece", type=int, default=0, help="wich subdivision of the dataset this client will have")
+    parser.add_argument("--checkpoint", type=str, default="bert-base-uncased", help="what checkpoint to use, leave blank for bert-base-uncased")
+    parser.add_argument("--epochs", type=int, default=1, help="how many epochs to run on this client")
 
     args = parser.parse_args()
     return args
 
 args = get_args()
+
 DEVICE = torch.device(f"cuda:{args.gpu}")
-CHECKPOINT = "arthurbittencourt/bert_classifier_2e16"
+CHECKPOINT = args.checkpoint
+EPOCHS = args.epochs
+
 DATASET_DIR = "/home/arthurbittencourt/depression-demil/demil/data/eRisk2021_partitioned/"
 
 def dataset_prep(ds):
@@ -170,7 +175,7 @@ def main():
         def fit(self, parameters, config):
             self.set_parameters(parameters)
             print("Training Started...")
-            train(net, trainloader, epochs=1)
+            train(net, trainloader, epochs=EPOCHS)
             print("Training Finished.")
             return self.get_parameters(config={}), len(trainloader), {}
 
