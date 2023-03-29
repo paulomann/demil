@@ -1,5 +1,6 @@
 from typing import Dict, List, Optional, OrderedDict, Tuple, Union
 import flwr as fl
+from flwr.server.strategy.fedopt import FedOpt
 import pickle
 import argparse
 import numpy as np
@@ -9,6 +10,7 @@ from transformers import AutoModelForSequenceClassification
 import centralized_eval
 
 DEFAULT_SERVER_ADDRESS = "[::]:8080"
+EXPERIMENT_NAME = "unnamed_experiment"
 
 def get_args():
     parser = argparse.ArgumentParser(description="Testando criar o servidor para o TensorFlow no CIFAR10 automaticamente")
@@ -45,6 +47,10 @@ def get_args():
         default=0,
         help="Wich gpu to put the centralized model"
     )
+    parser.add_argument(
+        "--exp_name", type=str, required=True, 
+        default="unnamed_experiment.csv"
+    )
     args = parser.parse_args()
     return args
 
@@ -57,17 +63,21 @@ def aggregate_metrics(eval_metrics):
         recall += metrics["recall"] * size
         fscore += metrics["fscore"] * size
         denominator += size
+        centralized_eval.append_metrics_to_csv(EXPERIMENT_NAME, metrics)
+
     
     return {"precision": precision/denominator, "recall": recall/denominator, "fscore": fscore/denominator}            
 
 
 def main() -> None:
     args = get_args()
+    global EXPERIMENT_NAME
+    EXPERIMENT_NAME = args.exp_name
     net = AutoModelForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2).to(args.gpu)
 
     # Define strategy
 
-    class SaveModelStrategy(fl.server.strategy.FedAvg):
+    class SaveModelStrategy(fl.server.strategy.fedopt.FedOpt):
         def aggregate_fit(
             self,
             server_round: int,
@@ -90,18 +100,24 @@ def main() -> None:
                 state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
                 net.load_state_dict(state_dict, strict=True)
 
-                # Save the model
-                torch.save(net.state_dict(), f"model_round_{server_round}.pth")
+                # Save the model only if its the last round
+                if server_round == args.rounds: 
+                    torch.save(net.state_dict(), f"model_round_{server_round}.pth")
 
             return aggregated_parameters, aggregated_metrics
     
+    # TODO: Put the right types of values in this
+    initial_weights = [val.cpu().numpy() for _, val in net.state_dict().items()] 
+    initial_weights = fl.common.weights_to_parameters(initial_weights)
+
     strategy = SaveModelStrategy(
         fraction_fit=args.sample_fraction,
         fraction_eval=args.sample_fraction,
         min_fit_clients=args.min_sample_size,
         min_eval_clients=args.min_sample_size,
         min_available_clients=args.min_num_clients,
-        evaluate_metrics_aggregation_fn=aggregate_metrics
+        evaluate_metrics_aggregation_fn=aggregate_metrics,
+        initial_parameters=initial_weights
     )
     
     '''
@@ -127,7 +143,9 @@ def main() -> None:
         grpc_max_message_length=1543194403
     )
 
-    centralized_eval.final_evaluate(net, args.gpu)
+    results = centralized_eval.final_evaluate(net, args.gpu)
+    centralized_eval.append_metrics_to_csv(args.exp_name, results)
+    #centralized_eval.aggregate_results_csv()
 
 
 if __name__ == "__main__":

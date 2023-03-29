@@ -4,6 +4,7 @@
 import argparse
 
 import pandas as pd
+import os.path
 
 from collections import OrderedDict
 import warnings
@@ -12,14 +13,14 @@ import flwr as fl
 import torch
 import numpy as np
 
-import random
 from torch.utils.data import DataLoader
 
-from datasets import load_dataset, load_metric, Dataset
+from datasets import Dataset
 
 from transformers import AutoTokenizer, DataCollatorWithPadding
 from transformers import AutoModelForSequenceClassification
 from transformers import AdamW
+from evaluate import load
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -38,6 +39,7 @@ args = get_args()
 DEVICE = torch.device(f"cuda:{args.gpu}")
 CHECKPOINT = args.checkpoint
 EPOCHS = args.epochs
+CSV_SAVE_DIR = f'/home/arthurbittencourt/depression-demil/demil/results/client{args.dataset_piece + 1}_results.csv' 
 
 DATASET_DIR = "/home/arthurbittencourt/depression-demil/demil/data/eRisk2021_partitioned/"
 
@@ -109,7 +111,7 @@ def load_data(piece):
 
 
 def train(net, trainloader, epochs):
-    optimizer = AdamW(net.parameters(), lr=5e-5)
+    optimizer = AdamW(net.parameters(), lr=1e-5)
     net.train()
     for _ in range(epochs):
         for batch in trainloader:
@@ -121,16 +123,16 @@ def train(net, trainloader, epochs):
             optimizer.zero_grad()
 
 
-def test(net, testloader):
-    accuracy = load_metric("accuracy")
-    precision = load_metric("precision")
-    recall = load_metric("recall")
-    f1 = load_metric("f1")
+def test(net, valloader):
+    accuracy = load("accuracy")
+    precision = load("precision")
+    recall = load("recall")
+    f1 = load("f1")
 
     loss = 0
     net.eval()
 
-    for batch in testloader:
+    for batch in valloader:
         batch = {k: v.to(DEVICE) for k, v in batch.items()}
         with torch.no_grad():
             outputs = net(**batch)
@@ -144,8 +146,8 @@ def test(net, testloader):
         f1.add_batch(predictions=predictions, references=batch["labels"])
 
 
-    testloader.dataset
-    loss /= len(testloader.dataset)
+    valloader.dataset
+    loss /= len(valloader.dataset)
     metrics = {
         "accuracy":accuracy.compute()["accuracy"],
         "precision":precision.compute()["precision"],
@@ -153,6 +155,11 @@ def test(net, testloader):
         "f1":f1.compute()["f1"],
     }
     return loss, metrics
+    
+def append_result(loss, metrics):
+    df = pd.DataFrame(metrics)
+    df['loss'] = loss
+    df.to_csv(CSV_SAVE_DIR, decimal=',', mode='a', header=(not os.path.exists(CSV_SAVE_DIR)))
 
 def main():
 
@@ -160,7 +167,7 @@ def main():
         CHECKPOINT, num_labels=2
     ).to(DEVICE)
 
-    trainloader, testloader, valloader = load_data(args.dataset_piece)
+    trainloader, _, valloader = load_data(args.dataset_piece)
 
     # Flower client
     class BertClassifierClient(fl.client.NumPyClient):
@@ -186,19 +193,20 @@ def main():
                 precision = float(metrics["precision"])
                 recall = float(metrics["recall"])
                 f1 = float(metrics["f1"])
-                print("Metrics: ", metrics)
+                print("Metrics: ", (loss, metrics))
+                
                 return float(loss), len(valloader), {
+                    "source": f"Client {args.dataset_piece}",
                     "accuracy": accuracy, 
                     "precision": precision, 
                     "recall": recall, 
-                    "fscore": f1
+                    "fscore": f1,
+                    "loss": loss
                 }
 
+    
     # Start client
     fl.client.start_numpy_client(server_address="[::]:8080", client=BertClassifierClient(), grpc_max_message_length=1543194403)
-    # loss, metrics = test(net=net, testloader=valloader)
-    # print("Results: ")
-    # print(metrics)
 
     '''
     print(f"WRITING WEIGHTS FOR SEED {seed}")
