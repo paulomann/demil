@@ -22,6 +22,8 @@ from transformers import AutoModelForSequenceClassification
 from transformers import AdamW
 from evaluate import load
 
+import bert_utils
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 def get_args():
@@ -39,82 +41,13 @@ args = get_args()
 DEVICE = torch.device(f"cuda:{args.gpu}")
 CHECKPOINT = args.checkpoint
 EPOCHS = args.epochs
-CSV_SAVE_DIR = f'/home/arthurbittencourt/depression-demil/demil/results/client{args.dataset_piece + 1}_results.csv' 
-
-DATASET_DIR = "/home/arthurbittencourt/depression-demil/demil/data/eRisk2021_partitioned/"
-
-def dataset_prep(ds):
-    ds.bdi[ds.bdi < 20] = 0
-    ds.bdi[ds.bdi >= 20] = 1
-
-    ds['text'] = ds.caption.fillna('')
-    ds['text'] = ds.text.str.replace(r"http\S+", "HTTP")
-    ds['text'] = ds.text.str.replace(r"@\w*", "USER")
-
-    ds = ds.rename(columns={'bdi':'label'})
-
-    ds = ds[['text', 'label']]
-
-    return ds
-
-def load_data(piece):
-    """Load eRisk2021 data (training and eval)"""
-    df_train = pd.read_csv(DATASET_DIR + f'train/{piece}.csv')
-    df_test = pd.read_csv(DATASET_DIR + f'test/{piece}.csv')
-    df_val = pd.read_csv(DATASET_DIR + f'val/{piece}.csv')
-
-    df_train = dataset_prep(df_train)
-    df_test = dataset_prep(df_test)
-    df_val = dataset_prep(df_val)
-
-    ds_train = Dataset.from_pandas(df_train)
-    ds_test = Dataset.from_pandas(df_test)
-    ds_val = Dataset.from_pandas(df_val)
-
-    tokenizer = AutoTokenizer.from_pretrained(CHECKPOINT)
-
-    def tokenize_function(examples):
-        return tokenizer(examples["text"], truncation=True)
-
-    ds_train = ds_train.map(tokenize_function, batched=True)
-    ds_test = ds_test.map(tokenize_function, batched=True)
-    ds_val = ds_val.map(tokenize_function, batched=True)
-
-    ds_train = ds_train.remove_columns("text")
-    ds_test = ds_test.remove_columns("text")
-    ds_val = ds_val.remove_columns("text")
-
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-
-    BATCH_SIZE = 6
-    
-    trainloader = DataLoader(
-        ds_train,
-        shuffle=True,
-        batch_size=BATCH_SIZE,
-        collate_fn=data_collator,
-    )
-
-    testloader = DataLoader(
-        ds_test, 
-        batch_size=BATCH_SIZE, 
-        collate_fn=data_collator
-    )
-
-    valloader = DataLoader(
-        ds_val, 
-        batch_size=BATCH_SIZE, 
-        collate_fn=data_collator
-    )
-
-    return trainloader, testloader, valloader
-
 
 def train(net, trainloader, epochs):
     optimizer = AdamW(net.parameters(), lr=1e-5)
     net.train()
     for _ in range(epochs):
         for batch in trainloader:
+            if 'username' in batch: batch.pop('username')
             batch = {k: v.to(DEVICE) for k, v in batch.items()}
             outputs = net(**batch)
             loss = outputs.loss
@@ -122,52 +55,15 @@ def train(net, trainloader, epochs):
             optimizer.step()
             optimizer.zero_grad()
 
-
-def test(net, valloader):
-    accuracy = load("accuracy")
-    precision = load("precision")
-    recall = load("recall")
-    f1 = load("f1")
-
-    loss = 0
-    net.eval()
-
-    for batch in valloader:
-        batch = {k: v.to(DEVICE) for k, v in batch.items()}
-        with torch.no_grad():
-            outputs = net(**batch)
-        logits = outputs.logits
-        loss += outputs.loss.item()
-        predictions = torch.argmax(logits, dim=-1)
-
-        accuracy.add_batch(predictions=predictions, references=batch["labels"])
-        precision.add_batch(predictions=predictions, references=batch["labels"])
-        recall.add_batch(predictions=predictions, references=batch["labels"])
-        f1.add_batch(predictions=predictions, references=batch["labels"])
-
-
-    valloader.dataset
-    loss /= len(valloader.dataset)
-    metrics = {
-        "accuracy":accuracy.compute()["accuracy"],
-        "precision":precision.compute()["precision"],
-        "recall":recall.compute()["recall"],
-        "f1":f1.compute()["f1"],
-    }
-    return loss, metrics
-    
-def append_result(loss, metrics):
-    df = pd.DataFrame(metrics)
-    df['loss'] = loss
-    df.to_csv(CSV_SAVE_DIR, decimal=',', mode='a', header=(not os.path.exists(CSV_SAVE_DIR)))
-
 def main():
 
     net = AutoModelForSequenceClassification.from_pretrained(
         CHECKPOINT, num_labels=2
     ).to(DEVICE)
 
-    trainloader, _, valloader = load_data(args.dataset_piece)
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+    trainloader, _, valloader = bert_utils.load_data(partition=args.dataset_piece, tokenizer=tokenizer, batch_size=6)
 
     # Flower client
     class BertClassifierClient(fl.client.NumPyClient):
@@ -188,14 +84,16 @@ def main():
 
         def evaluate(self, parameters, config):
                 self.set_parameters(parameters)
-                loss, metrics = test(net, valloader)
-                accuracy = float(metrics["accuracy"])
-                precision = float(metrics["precision"])
-                recall = float(metrics["recall"])
-                f1 = float(metrics["f1"])
-                print("Metrics: ", (loss, metrics))
+                metrics = bert_utils.test(net=net, dataloader=valloader, device=DEVICE, logger=None, source=f'Client {args.dataset_piece}')
                 
-                return float(loss), len(valloader), {
+                loss = metrics['loss']
+
+                print("Metrics: ", metrics)
+                
+                return float(loss), len(valloader), metrics
+
+                '''
+                float(loss), len(valloader), {
                     "source": f"Client {args.dataset_piece}",
                     "accuracy": accuracy, 
                     "precision": precision, 
@@ -203,6 +101,7 @@ def main():
                     "fscore": f1,
                     "loss": loss
                 }
+                '''
 
     
     # Start client

@@ -7,10 +7,12 @@ import numpy as np
 import torch
 from transformers import AutoModelForSequenceClassification
 
-import centralized_eval
+import bert_utils
 
 DEFAULT_SERVER_ADDRESS = "[::]:8080"
 EXPERIMENT_NAME = "unnamed_experiment"
+CHECKPOINT_DIR = "/home/arthurbittencourt/depression-demil/demil/checkpoints/"
+LOGGER = bert_utils.ExperimentLogger(EXPERIMENT_NAME)
 
 def get_args():
     parser = argparse.ArgumentParser(description="Testando criar o servidor para o TensorFlow no CIFAR10 automaticamente")
@@ -63,7 +65,8 @@ def aggregate_metrics(eval_metrics):
         recall += metrics["recall"] * size
         fscore += metrics["fscore"] * size
         denominator += size
-        centralized_eval.append_metrics_to_csv(EXPERIMENT_NAME, metrics)
+        
+        LOGGER.append_metrics(metrics)
 
     
     return {"precision": precision/denominator, "recall": recall/denominator, "fscore": fscore/denominator}            
@@ -73,10 +76,13 @@ def main() -> None:
     args = get_args()
     global EXPERIMENT_NAME
     EXPERIMENT_NAME = args.exp_name
+
+    global LOGGER
+    LOGGER = bert_utils.ExperimentLogger(EXPERIMENT_NAME)
+
     net = AutoModelForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2).to(args.gpu)
 
     # Define strategy
-
     class SaveModelStrategy(fl.server.strategy.fedopt.FedOpt):
         def aggregate_fit(
             self,
@@ -100,9 +106,12 @@ def main() -> None:
                 state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
                 net.load_state_dict(state_dict, strict=True)
 
-                # Save the model only if its the last round
-                if server_round == args.rounds: 
-                    torch.save(net.state_dict(), f"model_round_{server_round}.pth")
+                # Save model every round
+                if True: # server_round % 5 == 0: 
+                    torch.save(net.state_dict(), CHECKPOINT_DIR + f"model_round_{server_round}.pth")
+
+                # Run an evaluation every round
+                bert_utils.round_eval(net=net, device=args.gpu, logger=LOGGER, eval_msg=f"Eval Round {server_round}")
 
             return aggregated_parameters, aggregated_metrics
     
@@ -143,9 +152,10 @@ def main() -> None:
         grpc_max_message_length=1543194403
     )
 
-    results = centralized_eval.final_evaluate(net, args.gpu)
-    centralized_eval.append_metrics_to_csv(args.exp_name, results)
-    #centralized_eval.aggregate_results_csv()
+    bert_utils.round_eval(net=net, device=args.gpu, logger=LOGGER)
+    
+    LOGGER.log_experiment()
+    #bert_utils.aggregate_results_csv()
 
 
 if __name__ == "__main__":
