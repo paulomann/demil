@@ -21,6 +21,11 @@ import open_clip
 import fasttext
 import fasttext.util
 
+class BERTClassifier():
+    def __init__(self, model_name='arthurbittencourt/bert_classifier_2e16') -> None:
+        self.model = AutoModel.from_pretrained(model_name)
+
+
 class PoolerWrapper():
     def __init__(self, out_features) -> None:
         self.dense = DenseWrapper(out_features=out_features)
@@ -38,23 +43,6 @@ class FastTextWrapper():
         self.ft = fasttext.load_model('/home/arthurbittencourt/depression-demil/demil/scripts/cc.en.300.bin')   
         self.pooler = PoolerWrapper(self.ft.get_dimension())
 
-    def __call__(self, input_ids, attn_mask):
-        # TODO: Return something here
-        # print("Input Ids: ", input_ids)
-        # print("Attn_Mask: ", attn_mask)
-        
-        words_vector = self.ft.get_words()
-        input_words = [words_vector[input_id] for input_id in input_ids[0]]
-
-        input_sentence = ""
-        for word in input_words:
-            input_sentence += word
-
-        text_ftrs = self.ft.get_sentence_vector(input_sentence)
-        text_ftrs = torch.tensor(text_ftrs)
-        text_ftrs = text_ftrs.to('cuda:7') # TODO : When actually running this, this needs to get the gpu it runs
-
-        return None, text_ftrs
 
     def tokenizer(self,
             caption,
@@ -65,32 +53,30 @@ class FastTextWrapper():
             return_attention_mask=True,
             truncation=True,
         ):
+        
 
+        # text pre processing
+        caption = caption.replace('\n', '</s>')
+        caption = caption.replace(r"(http\S+)", 'hyperlink')
+        caption = caption.replace(r"[^a-zA-Z ]","")
+        caption = caption.replace(r"( +)", ' ')
+        caption = caption.lower()
+        
         tokens = fasttext.tokenize(caption)
 
-        input_ids = [self.ft.get_word_id(word) for word in tokens]
+        if (max_length - len(tokens)) < 0:
+            input_ids = tokens[:max_length]
+        else:
+            padding = ['']*(max_length - len(tokens))
+            input_ids = tokens + padding
+        
 
-        length = min(len(input_ids), max_length)
-        if (length < max_length): padding_length = max_length - len(input_ids) 
-        else: padding_length = 0
+        input_ids = self.ft.get_sentence_vector(caption)
 
-        input_ids.extend([0]*padding_length)       
-        input_ids = torch.tensor(input_ids[:max_length])
-
-        # type_ids seems unused in the current implementation
-        type_ids = torch.zeros(len(input_ids))
-
-        attn_mask = [1] * length
-        attn_mask.extend([0]*padding_length)
-        attn_mask = torch.tensor(attn_mask)
-
-        # print(f"=========[len(input_ids)]========>{len(input_ids)}")
-
-        input_ids = input_ids.unsqueeze(0)
-        attn_mask = attn_mask.unsqueeze(0)
-        type_ids = type_ids.unsqueeze(0)
-
-        return {'input_ids':input_ids, 'token_type_ids':type_ids ,'attention_mask':attn_mask}
+        if input_ids == padding:
+            return {'input_ids':torch.zeros(size=(300,300)), 'attention_mask':torch.tensor([])}
+        else:
+            return {'input_ids':torch.tensor(np.array(input_ids)).unsqueeze(0), 'attention_mask':torch.tensor([])}
 
 
 class TextMCLIP(MultilingualCLIP):
@@ -521,8 +507,12 @@ class MSIL(pl.LightningModule):
         textual_ftrs = 1
         visual_ftrs = 1
         if self.text:
-
-            textual_ftrs = self.text_encoder(input_ids.squeeze(1), attn_mask.squeeze(1))[-1]
+            
+            if hasattr(self.text_encoder, "ft"): # test to see if this is a FastTextWrapper() instance
+                textual_ftrs = input_ids
+            else:
+                textual_ftrs = self.text_encoder(input_ids.squeeze(1), attn_mask.squeeze(1))[-1]
+            
             textual_ftrs = self.dropout(self.text_proj(self.txt_norm(textual_ftrs)))
 
         if self.visual:

@@ -70,6 +70,7 @@ def main():
 
     # Log baseline
     baseline_metrics = bert_utils.test(net, testloader, DEVICE, logger=LOGGER, source="Baseline")
+    print(f"Baseline: {baseline_metrics}")
 
     # Start Training, three times incrementing the learning rate
     print("Sarting Training...")

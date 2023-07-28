@@ -17,13 +17,16 @@ from transformers import AutoTokenizer, DataCollatorWithPadding
 
 from sklearn.metrics import precision_recall_fscore_support
 
+import time
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # CHECKPOINT = "mental/mental-bert-base-uncased"
 DATASET_DIR = "/home/arthurbittencourt/depression-demil/demil/data/"
 RESULTS_DIR = "/home/arthurbittencourt/depression-demil/demil/results/"
 
-def dataset_prep(ds):
+def dataset_prep(df:pd.DataFrame):
+    ds = df.copy(deep=True)
     ds.bdi = ds.bdi.where(ds.bdi >= 20, 0)
     ds.bdi = ds.bdi.where(ds.bdi < 20, 1)
     ds = ds.dropna(axis=0, subset=["caption"])
@@ -49,9 +52,9 @@ def get_user_dict(df):
 def load_data(dataset="eRisk2021", partition=False, tokenizer=AutoTokenizer.from_pretrained("bert-base-uncased"), batch_size=6):
 
     if partition != False:
-        df_train = pd.read_csv(DATASET_DIR + dataset + '/train/' + f'{partition}.csv')
-        df_test = pd.read_csv(DATASET_DIR + dataset + '/test/' + f'{partition}.csv')
-        df_val = pd.read_csv(DATASET_DIR + dataset + '/val/' + f'{partition}.csv')
+        df_train = pd.read_csv(DATASET_DIR + dataset + '_partitioned/' +'train/' + f'{partition}.csv')
+        df_test = pd.read_csv(DATASET_DIR + dataset + '_partitioned/' +'/test/' + f'{partition}.csv')
+        df_val = pd.read_csv(DATASET_DIR + dataset + '_partitioned/' +'/val/' + f'{partition}.csv')
         
     else:
         df_train = pd.read_csv(DATASET_DIR + dataset + '/' + f'train.csv')
@@ -122,22 +125,30 @@ class UserMetrics():
     def compute(self):        
         pred = []
         label = []
+        
+        print("==============[Computing UserMetrics]=================")
+        print("Users: ", self.users)
         for user in self.users:
             positive = self.users[user]['positive']
             total = self.users[user]['total']
 
-            if positive/total > 0.5: pred.append(1) 
+            if positive/total > 0.5: pred.append(1) # se a quantidade de posts positivos for maior que a metade, considere o usuário como positivo
             else: pred.append(0)
 
             label.append(self.users[user]['label'])
-        
-        precision, recall, f1, _ = precision_recall_fscore_support(label, pred, average='macro')
+
+        print("Predictions:", pred)
+        print("Labels:", label)
+        precision, recall, f1, _ = precision_recall_fscore_support(y_true=label, y_pred=pred, average='macro')
+
 
         return {'user_precision':precision, 'user_recall':recall, 'user_f1':f1}
         
 
 
 def test(net, dataloader, device, logger = None, source='Aggregate Model'):
+    
+    #print("==============[Evaluating]=================")
     accuracy = load("accuracy")
     precision = load("precision")
     recall = load("recall")
@@ -147,22 +158,30 @@ def test(net, dataloader, device, logger = None, source='Aggregate Model'):
     loss = 0
     net.eval()
 
-    for batch in dataloader:
-        if 'username' in batch:
-            usernames = batch.pop('username')
-        batch = {k: v.to(device) for k, v in batch.items()}
-        with torch.no_grad():
-            outputs = net(**batch)
-        logits = outputs.logits
-        loss += outputs.loss.item()
-        predictions = torch.argmax(logits, dim=-1)
+    preds = []
+    labels = []
+    with torch.no_grad():
+        for batch in dataloader:
+            if 'username' in batch:
+                usernames = batch.pop('username')
+            batch = {k: v.to(device) for k, v in batch.items()}
+            with torch.no_grad():
+                outputs = net(**batch)
+            logits = outputs.logits
+            loss += outputs.loss.item()
+            predictions = torch.argmax(logits, dim=-1)
 
-        accuracy.add_batch(predictions=predictions, references=batch["labels"])
-        precision.add_batch(predictions=predictions, references=batch["labels"])
-        recall.add_batch(predictions=predictions, references=batch["labels"])
-        f1.add_batch(predictions=predictions, references=batch["labels"])
-        um.add_batch(usernames, predictions, batch['labels'])
+            preds.extend(predictions.tolist())
+            labels.extend(batch["labels"].tolist())
 
+            accuracy.add_batch(predictions=predictions, references=batch["labels"])
+            precision.add_batch(predictions=predictions, references=batch["labels"])
+            recall.add_batch(predictions=predictions, references=batch["labels"])
+            f1.add_batch(predictions=predictions, references=batch["labels"])
+            um.add_batch(usernames, predictions, batch['labels'])
+
+    print("Preds: ", preds, '\n Labels: ', labels)    
+    #print(f"Predictions: \n Negative: {positive_preds}\n Positive: {negative_preds}")
 
     dataloader.dataset
     loss /= len(dataloader.dataset)
@@ -176,24 +195,28 @@ def test(net, dataloader, device, logger = None, source='Aggregate Model'):
         "loss": loss,
         "user_precision":user_metrics["user_precision"],
         "user_recall":user_metrics["user_recall"],
-        "user_f1":user_metrics["user_f1"]
+        "user_f1":user_metrics["user_f1"],
+        "timestamp":time.time()
     }
 
     if logger:
+        #print("[INFO] Appending metrics from test")
         logger.append_metrics(metrics)
 
     return metrics
 
     
 
-def final_evaluate(net, device): # Used for testing aggregated bert models, after a fl round
-    print("===============[Final Evaluation]===============")
+def round_eval(net, device, logger, eval_msg = "Final Evaluation"): # Used for testing aggregated bert models, after a fl round
+    print(f"===============[{eval_msg}]===============")
     
     _, testloader, _ = load_data()
     metrics = test(net, testloader, device)
+
+    logger.append_metrics(metrics)
     
     print(metrics)
-    print("===============[Final Evaluation]===============")
+    print(f"===============[{eval_msg}]===============")
     
     return metrics
 
@@ -225,5 +248,13 @@ def append_metrics_to_csv(experiment_name, metrics):
 
 
 if __name__ == "__main__":
-    el = ExperimentLogger("hello world")
-    print(el.exp_name)
+    from transformers import AutoModelForSequenceClassification
+    net = AutoModelForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2).to(7)
+    trainloader, testloader, valloader = load_data()
+    results = test(net=net, dataloader=testloader, device=7)
+
+    logger = ExperimentLogger("baseline_evaluation")
+    logger.append_metrics(results)
+    logger.log_experiment()
+
+    print(results)

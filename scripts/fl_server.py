@@ -55,7 +55,6 @@ def main() -> None:
 
     # Define strategy
     
-    '''
     strategy = fl.server.strategy.FedAvg(
         fraction_fit=args.sample_fraction,
         fraction_eval=args.sample_fraction,
@@ -64,8 +63,8 @@ def main() -> None:
         min_available_clients=args.min_num_clients,
         evaluate_metrics_aggregation_fn=aggregate_metrics
     )
-    '''
     
+    '''
     with open('weights.bin', 'rb') as fp:
         initial_weights = pickle.load(fp)
     initial_parameters = fl.common.weights_to_parameters(initial_weights)
@@ -78,6 +77,7 @@ def main() -> None:
         evaluate_metrics_aggregation_fn=aggregate_metrics,
         initial_parameters=initial_parameters
     )
+    '''
 
     # Start Flower server for three rounds of federated learning
     fl.server.start_server(

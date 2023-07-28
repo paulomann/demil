@@ -156,7 +156,7 @@ def get_args():
     return args
 
 def get_dataset(data_dir):
-    dataset_pd = pd.read_csv(data_dir)
+    dataset_pd = pd.read_csv(data_dir).dropna(axis=0, subset=["caption"]).reset_index()
 
     bdi = dataset_pd['bdi']
 
@@ -168,8 +168,6 @@ def get_dataset(data_dir):
 if __name__ == '__main__':
     args = get_args()
     
-
-
     # hardcoded for eRisk2021 for now, parameter later
     num_class = args.num_classes
     class_id = args.class_id

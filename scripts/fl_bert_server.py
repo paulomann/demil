@@ -144,6 +144,9 @@ def main() -> None:
     )
     '''
 
+    # Baseline Test
+    bert_utils.round_eval(net=net, device=args.gpu, logger=LOGGER, eval_msg="Baseline")
+
     # Start Flower server for three rounds of federated learning
     fl.server.start_server(
         server_address=args.server_address,
@@ -152,6 +155,7 @@ def main() -> None:
         grpc_max_message_length=1543194403
     )
 
+    # Final Eval
     bert_utils.round_eval(net=net, device=args.gpu, logger=LOGGER)
     
     LOGGER.log_experiment()

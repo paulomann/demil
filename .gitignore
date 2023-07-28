@@ -144,3 +144,10 @@ venv_fl/
 
 # screen logs
 screen*
+
+#torch checkpoints
+*.pth
+
+# results path
+
+results/*
